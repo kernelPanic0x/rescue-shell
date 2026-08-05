@@ -1,28 +1,19 @@
 // src/victim.rs
 use crate::protocol::{Msg, decode, encode};
 use anyhow::{Context, Result};
-use magic_wormhole::{AppID, MailboxConnection, Wormhole, transfer::APP_CONFIG};
+use magic_wormhole::{
+    Wormhole,
+    transit::{Abilities, RelayHint},
+};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use tokio::sync::mpsc;
 
-pub async fn run(mirror: bool) -> Result<()> {
-    // ── 1. Wormhole handshake ──────────────────────────────────────
-    // API note: in 0.7 this is MailboxConnection::create(config, passphrase_len)
-    // and yields (welcome, code-future). In 0.6 it was
-    // Wormhole::connect_without_code(...). Check your pinned version.
-    let mailbox =
-        MailboxConnection::create(APP_CONFIG.id(AppID::new("rescue-shell-v1")), 2).await?;
-    let code = mailbox.code().clone();
-    println!("════════════════════════════════════════");
-    println!("  Give this code to your helper:");
-    println!("      {code}");
-    println!("════════════════════════════════════════");
-    println!("Waiting for them to connect...");
-
-    let mut wormhole = Wormhole::connect(mailbox).await?;
-    println!("Helper connected! Starting shell.\n");
-
+pub async fn run(
+    mut wormhole: Wormhole,
+    _relay_hints: Vec<RelayHint>,
+    _abilities: Abilities,
+) -> Result<()> {
     // ── 2. Create the PTY ─────────────────────────────────────────
     // Start with a sane default; a Resize message arrives momentarily.
     let pty_system = native_pty_system();
@@ -48,20 +39,20 @@ pub async fn run(mirror: bool) -> Result<()> {
     let pty_writer = master.take_writer()?;
 
     // ── 4. Optional: mirror to the victim's physical console ──────
-    let mut console = if mirror {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/tty")
-            .ok()
-            .map(|f| {
-                if let Some((c, r)) = console_size() {
-                    let _ = wormhole_send_console_size(c, r); // see below
-                }
-                f
-            })
-    } else {
-        None
-    };
+    // let mut console = if mirror {
+    //     std::fs::OpenOptions::new()
+    //         .write(true)
+    //         .open("/dev/tty")
+    //         .ok()
+    //         .map(|f| {
+    //             if let Some((c, r)) = console_size() {
+    //                 let _ = wormhole_send_console_size(c, r); // see below
+    //             }
+    //             f
+    //         })
+    // } else {
+    //     None
+    // };
 
     // ── 5. Bridge: PTY (blocking IO) <-> wormhole (async) ─────────
     //
@@ -99,7 +90,7 @@ pub async fn run(mirror: bool) -> Result<()> {
         tokio::select! {
             // Shell output -> helper (+ optional local mirror)
             Some(bytes) = pty_out_rx.recv() => {
-                if let Some(c) = &mut console { let _ = c.write_all(&bytes); }
+                // if let Some(c) = &mut console { let _ = c.write_all(&bytes); }
                 wormhole.send(encode(&Msg::Data(bytes))?).await?;
             }
 

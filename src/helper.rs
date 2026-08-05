@@ -6,7 +6,10 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, size},
 };
 use futures::StreamExt;
-use magic_wormhole::{AppID, Code, MailboxConnection, Wormhole, transfer::APP_CONFIG};
+use magic_wormhole::{
+    Wormhole,
+    transit::{Abilities, RelayHint},
+};
 use std::io::Write;
 
 /// Restore the terminal no matter how we exit.
@@ -17,18 +20,11 @@ impl Drop for RawGuard {
     }
 }
 
-pub async fn run(code: Code) -> Result<()> {
-    // ── 1. Connect ────────────────────────────────────────────────
-    println!("Connecting to {code} ...");
-    let mailbox = MailboxConnection::connect(
-        APP_CONFIG.id(AppID::new("rescue-shell-v1")),
-        code,
-        true, // allocate (passphrase already supplied by code)
-    )
-    .await?;
-    let mut wormhole = Wormhole::connect(mailbox).await?;
-    println!("Connected. Session started — Ctrl+] to detach.\n");
-
+pub async fn run(
+    mut wormhole: Wormhole,
+    _relay_hints: Vec<RelayHint>,
+    _abilities: Abilities,
+) -> Result<()> {
     // ── 2. Raw mode + initial size ────────────────────────────────
     enable_raw_mode()?;
     let _guard = RawGuard;

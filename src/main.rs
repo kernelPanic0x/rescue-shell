@@ -5,10 +5,14 @@ mod helper;
 mod protocol;
 mod victim;
 
-use std::str::FromStr;
+use std::{borrow::Cow, str::FromStr};
 
 use clap::{Args, Parser, Subcommand};
-use magic_wormhole::Code;
+use magic_wormhole::{
+    AppID, Code, MailboxConnection, Wormhole,
+    transfer::APP_CONFIG,
+    transit::{self, RelayHint},
+};
 
 #[derive(Parser)]
 #[command(about = "Remote rescue shell over magic-wormhole")]
@@ -20,9 +24,6 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     Serve {
-        #[arg(long)]
-        mirror: bool,
-
         #[command(flatten)]
         common: CommonArgs,
     },
@@ -55,14 +56,68 @@ struct CommonArgs {
     force_relay: bool,
 }
 
+fn parse_transit_args(args: &CommonArgs) -> transit::Abilities {
+    match (args.force_direct, args.force_relay) {
+        (false, false) => transit::Abilities::ALL,
+        (true, false) => transit::Abilities::FORCE_DIRECT,
+        (false, true) => transit::Abilities::FORCE_RELAY,
+        (true, true) => unreachable!("These flags are mutually exclusive"),
+    }
+}
+
+fn parse_relay_hints(relay_servers: &[url::Url]) -> anyhow::Result<Vec<RelayHint>> {
+    relay_servers
+        .iter()
+        .map(|url| {
+            RelayHint::from_urls(
+                url.host_str().map(str::to_owned), // human-readable name
+                std::iter::once(url.clone()),
+            )
+            .map_err(Into::into)
+        })
+        .collect()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
     match cli.cmd {
-        Cmd::Serve { mirror, common } => victim::run(mirror).await,
+        Cmd::Serve { common } => {
+            let config = app_config(&common);
+            let relay_hints = parse_relay_hints(&common.relay_server)?;
+            let abilities = parse_transit_args(&common);
+
+            let mailbox = MailboxConnection::create(config, 2).await?;
+            let code = mailbox.code().clone();
+            println!("════════════════════════════════════════");
+            println!("  Give this code to your helper:");
+            println!("      {code}");
+            println!("════════════════════════════════════════");
+            println!("Waiting for them to connect...");
+
+            let wormhole = Wormhole::connect(mailbox).await?;
+            victim::run(wormhole, relay_hints, abilities).await
+        }
         Cmd::Connect { common } => {
+            let config = app_config(&common);
+            let relay_hints = parse_relay_hints(&common.relay_server)?;
+            let abilities = parse_transit_args(&common);
+
             let code = Code::from_str(&completer::enter_code()?)?;
-            helper::run(code).await
+            let mailbox = MailboxConnection::connect(config, code, true).await?;
+            let wormhole = Wormhole::connect(mailbox).await?;
+            helper::run(wormhole, relay_hints, abilities).await
         }
     }
+}
+
+fn app_config(
+    common: &CommonArgs,
+) -> magic_wormhole::AppConfig<magic_wormhole::transfer::AppVersion> {
+    let mut config = APP_CONFIG.id(AppID::new("rescue-shell-v1"));
+    if let Some(url) = &common.rendezvous_server {
+        config = config.rendezvous_url(Cow::Owned(url.to_string()));
+    }
+    config
 }
