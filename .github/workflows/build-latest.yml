@@ -1,0 +1,91 @@
+name: Build and Release Latest
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Allows manual trigger from GitHub Actions UI
+
+permissions:
+  contents: write # Needed for modifying releases
+
+env:
+  BINARY_NAME: "rescue-shell"
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          # MUSL targets for static ELF binaries
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          
+          # Optional: You can also add glibc (gnu) targets.
+          # zigbuild lets you specify older glibc versions (e.g. .2.17) for max compatibility!
+          # - x86_64-unknown-linux-gnu.2.17
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Note: If targeting a specific glibc like 'x86_64-unknown-linux-gnu.2.17',
+          # pass the base target 'x86_64-unknown-linux-gnu' to rustup here.
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild and Zig
+        run: pip install cargo-zigbuild
+
+      - name: Build with cargo-zigbuild
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Compress with UPX
+        uses: crazy-max/ghaction-upx@v4
+        with:
+          version: latest
+          files: |
+            target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}
+          args: --best --lzma
+
+      - name: Rename binary for artifact upload
+        run: |
+          mv target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} ./${{ env.BINARY_NAME }}-${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: ./${{ env.BINARY_NAME }}-${{ matrix.target }}
+
+  publish:
+    name: Update Latest Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: Publish Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Remove previous release and tag to keep download URLs static
+          gh release delete latest --yes --cleanup-tag || true
+          
+          # Brief sleep to allow GitHub API processing
+          sleep 2
+          
+          # Create new release with updated binaries
+          gh release create latest \
+            --title "Latest Development Build" \
+            --notes "Automated build from the main branch." \
+            --prerelease \
+            ./${{ env.BINARY_NAME }}-*
