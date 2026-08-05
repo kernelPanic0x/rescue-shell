@@ -14,6 +14,8 @@ use magic_wormhole::{
     transit::{self, RelayHint},
 };
 
+use crate::{helper::Helper, victim::Victim};
+
 #[derive(Parser)]
 #[command(about = "Remote rescue shell over magic-wormhole")]
 struct Cli {
@@ -97,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Waiting for them to connect...");
 
             let wormhole = Wormhole::connect(mailbox).await?;
-            victim::run(wormhole, relay_hints, abilities).await
+            Victim::new(wormhole, relay_hints, abilities).run().await
         }
         Cmd::Connect { common } => {
             let config = app_config(&common);
@@ -107,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
             let code = Code::from_str(&completer::enter_code()?)?;
             let mailbox = MailboxConnection::connect(config, code, true).await?;
             let wormhole = Wormhole::connect(mailbox).await?;
-            helper::run(wormhole, relay_hints, abilities).await
+            Helper::new(wormhole, relay_hints, abilities).run().await
         }
     }
 }

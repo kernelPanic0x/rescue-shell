@@ -20,64 +20,77 @@ impl Drop for RawGuard {
     }
 }
 
-pub async fn run(
-    mut wormhole: Wormhole,
-    _relay_hints: Vec<RelayHint>,
-    _abilities: Abilities,
-) -> Result<()> {
-    // ── 2. Raw mode + initial size ────────────────────────────────
-    enable_raw_mode()?;
-    let _guard = RawGuard;
+#[derive(Debug)]
+pub struct Helper {
+    wormhole: Wormhole,
+    relay_hints: Vec<RelayHint>,
+    abilities: Abilities,
+}
 
-    let (cols, rows) = size()?;
-    wormhole.send(encode(&Msg::Resize { cols, rows })?).await?;
-
-    // ── 3. stdout pump: write incoming bytes straight to screen ───
-    let mut stdout = std::io::stdout();
-    let mut events = EventStream::new();
-
-    let result = loop {
-        tokio::select! {
-            // Local keystrokes -> victim (or intercepted locally)
-            maybe_ev = events.next() => {
-                match maybe_ev {
-                    Some(Ok(Event::Key(k))) => {
-                        if is_escape(k) { break Ok(()); }   // Ctrl+] detach
-                        if let Some(bytes) = key_to_bytes(k) {
-                            wormhole.send(encode(&Msg::Data(bytes))?).await?;
-                        }
-                    }
-                    Some(Ok(Event::Resize(cols, rows))) => {
-                        wormhole.send(encode(&Msg::Resize { cols, rows })?).await?;
-                    }
-                    Some(Ok(Event::Paste(s))) => {
-                        wormhole.send(encode(&Msg::Data(s.into_bytes()))?).await?;
-                    }
-                    Some(Err(_)) | None => break Ok(()),
-                    _ => {}
-                }
-            }
-
-            // Victim output -> my screen
-            incoming = wormhole.receive() => {
-                match incoming {
-                    Ok(raw) => match decode(&raw)? {
-                        Msg::Data(bytes) => {
-                            stdout.write_all(&bytes)?;
-                            stdout.flush()?;
-                        }
-                        Msg::Bye => break Ok(()),
-                        _ => {}
-                    },
-                    Err(e) => break Err(e.into()),
-                }
-            }
+impl Helper {
+    pub fn new(wormhole: Wormhole, relay_hints: Vec<RelayHint>, abilities: Abilities) -> Self {
+        Self {
+            wormhole,
+            relay_hints,
+            abilities,
         }
-    };
+    }
 
-    let _ = wormhole.send(encode(&Msg::Bye)?).await;
-    println!("\r\n[session ended]");
-    result
+    pub async fn run(&mut self) -> Result<()> {
+        enable_raw_mode()?;
+        let _guard = RawGuard;
+
+        let (cols, rows) = size()?;
+        self.wormhole
+            .send(encode(&Msg::Resize { cols, rows })?)
+            .await?;
+
+        let mut stdout = std::io::stdout();
+        let mut events = EventStream::new();
+
+        let result = loop {
+            tokio::select! {
+                // Local keystrokes -> victim (or intercepted locally)
+                maybe_ev = events.next() => {
+                    match maybe_ev {
+                        Some(Ok(Event::Key(k))) => {
+                            if is_escape(k) { break Ok(()); }   // Ctrl+] detach
+                            if let Some(bytes) = key_to_bytes(k) {
+                                self.wormhole.send(encode(&Msg::Data(bytes))?).await?;
+                            }
+                        }
+                        Some(Ok(Event::Resize(cols, rows))) => {
+                            self.wormhole.send(encode(&Msg::Resize { cols, rows })?).await?;
+                        }
+                        Some(Ok(Event::Paste(s))) => {
+                            self.wormhole.send(encode(&Msg::Data(s.into_bytes()))?).await?;
+                        }
+                        Some(Err(_)) | None => break Ok(()),
+                        _ => {}
+                    }
+                }
+
+                // Victim output -> my screen
+                incoming = self.wormhole.receive() => {
+                    match incoming {
+                        Ok(raw) => match decode(&raw)? {
+                            Msg::Data(bytes) => {
+                                stdout.write_all(&bytes)?;
+                                stdout.flush()?;
+                            }
+                            Msg::Bye => break Ok(()),
+                            _ => {}
+                        },
+                        Err(e) => break Err(e.into()),
+                    }
+                }
+            }
+        };
+
+        let _ = self.wormhole.send(encode(&Msg::Bye)?).await;
+        println!("\r\n[session ended]");
+        result
+    }
 }
 
 fn is_escape(k: KeyEvent) -> bool {

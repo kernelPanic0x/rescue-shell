@@ -1,4 +1,3 @@
-// src/protocol.rs
 use wincode::{SchemaRead, SchemaWrite};
 
 /// Every message on the wire. The wormhole channel is already
