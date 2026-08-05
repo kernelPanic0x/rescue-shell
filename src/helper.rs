@@ -1,16 +1,12 @@
-// src/helper.rs
-use crate::protocol::{Msg, decode, encode};
+use crate::{
+    link,
+    protocol::{Msg, decode, encode},
+};
 use anyhow::Result;
-use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers},
-    terminal::{disable_raw_mode, enable_raw_mode, size},
-};
-use futures::StreamExt;
-use magic_wormhole::{
-    Wormhole,
-    transit::{Abilities, RelayHint},
-};
-use std::io::Write;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
+use magic_wormhole::transit::Transit;
+use std::io::{Read, Write};
+use tokio::sync::mpsc;
 
 /// Restore the terminal no matter how we exit.
 struct RawGuard;
@@ -20,60 +16,69 @@ impl Drop for RawGuard {
     }
 }
 
-#[derive(Debug)]
-pub struct Helper {
-    wormhole: Wormhole,
-    relay_hints: Vec<RelayHint>,
-    abilities: Abilities,
-}
+#[derive(Default)]
+pub struct Helper;
 
 impl Helper {
-    pub fn new(wormhole: Wormhole, relay_hints: Vec<RelayHint>, abilities: Abilities) -> Self {
-        Self {
-            wormhole,
-            relay_hints,
-            abilities,
-        }
-    }
+    pub async fn run(transit: Transit) -> Result<()> {
+        let (mut tx, mut rx) = link::channel(transit);
 
-    pub async fn run(&mut self) -> Result<()> {
         enable_raw_mode()?;
         let _guard = RawGuard;
 
         let (cols, rows) = size()?;
-        self.wormhole
-            .send(encode(&Msg::Resize { cols, rows })?)
-            .await?;
+        tx.send(&Msg::Resize { cols, rows }).await?;
 
         let mut stdout = std::io::stdout();
-        let mut events = EventStream::new();
+
+        // Pump raw stdin bytes to an async channel
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        #[cfg(unix)]
+        let mut sigwinch =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
 
         let result = loop {
+            #[cfg(unix)]
+            let sigwinch_recv = sigwinch.recv();
+            #[cfg(not(unix))]
+            let sigwinch_recv = std::future::pending::<Option<()>>();
+
             tokio::select! {
-                // Local keystrokes -> victim (or intercepted locally)
-                maybe_ev = events.next() => {
-                    match maybe_ev {
-                        Some(Ok(Event::Key(k))) => {
-                            if is_escape(k) { break Ok(()); }   // Ctrl+] detach
-                            if let Some(bytes) = key_to_bytes(k) {
-                                self.wormhole.send(encode(&Msg::Data(bytes))?).await?;
-                            }
-                        }
-                        Some(Ok(Event::Resize(cols, rows))) => {
-                            self.wormhole.send(encode(&Msg::Resize { cols, rows })?).await?;
-                        }
-                        Some(Ok(Event::Paste(s))) => {
-                            self.wormhole.send(encode(&Msg::Data(s.into_bytes()))?).await?;
-                        }
-                        Some(Err(_)) | None => break Ok(()),
-                        _ => {}
+                // Raw stdin bytes -> victim
+                Some(bytes) = stdin_rx.recv() => {
+                    // Ctrl+] is ASCII 0x1D (29) -> Detach shortcut
+                    if bytes.contains(&0x1d) {
+                        break Ok(());
+                    }
+                    tx.send(&Msg::Data(bytes)).await?;
+                }
+
+                // Window resize signal (SIGWINCH)
+                _ = sigwinch_recv => {
+                    if let Ok((cols, rows)) = size() {
+                        tx.send(&Msg::Resize { cols, rows }).await?;
                     }
                 }
 
                 // Victim output -> my screen
-                incoming = self.wormhole.receive() => {
+                incoming = rx.recv() => {
                     match incoming {
-                        Ok(raw) => match decode(&raw)? {
+                        Ok(raw) => match raw {
                             Msg::Data(bytes) => {
                                 stdout.write_all(&bytes)?;
                                 stdout.flush()?;
@@ -87,45 +92,8 @@ impl Helper {
             }
         };
 
-        let _ = self.wormhole.send(encode(&Msg::Bye)?).await;
+        let _ = tx.send(&Msg::Bye).await?;
         println!("\r\n[session ended]");
         result
     }
-}
-
-fn is_escape(k: KeyEvent) -> bool {
-    k.code == KeyCode::Char(']') && k.modifiers.contains(KeyModifiers::CONTROL)
-}
-
-/// Translate crossterm keys into the bytes a real terminal would send.
-fn key_to_bytes(k: KeyEvent) -> Option<Vec<u8>> {
-    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    let v: Vec<u8> = match k.code {
-        KeyCode::Char(c) if ctrl => {
-            // Ctrl+A..Z => 0x01..0x1A  (what the shell expects)
-            let c = c.to_ascii_lowercase();
-            if ('a'..='z').contains(&c) {
-                vec![c as u8 - b'a' + 1]
-            } else {
-                return None;
-            }
-        }
-        KeyCode::Char(c) => c.to_string().into_bytes(),
-        KeyCode::Enter => b"\r".to_vec(),
-        KeyCode::Backspace => b"\x7f".to_vec(),
-        KeyCode::Tab => b"\t".to_vec(),
-        KeyCode::Esc => b"\x1b".to_vec(),
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::PageUp => b"\x1b[5~".to_vec(),
-        KeyCode::PageDown => b"\x1b[6~".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        _ => return None,
-    };
-    Some(v)
 }

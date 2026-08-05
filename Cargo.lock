@@ -1894,6 +1894,7 @@ dependencies = [
  "magic-wormhole",
  "portable-pty",
  "serde",
+ "serde_json",
  "signal-hook 0.4.4",
  "signal-hook-tokio",
  "tokio",

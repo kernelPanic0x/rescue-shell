@@ -1,41 +1,45 @@
-use crate::protocol::{Msg, decode, encode};
-use anyhow::{Context, Result};
-use magic_wormhole::{
-    Wormhole,
-    transit::{Abilities, RelayHint},
+use crate::{
+    link,
+    protocol::{Msg, decode},
 };
+use anyhow::{Context, Result};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
+use futures::FutureExt;
+use magic_wormhole::transit::Transit;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use tokio::sync::mpsc;
 
-#[derive(Debug)]
-pub struct Victim {
-    wormhole: Wormhole,
-    relay_hints: Vec<RelayHint>,
-    abilities: Abilities,
+/// Restore Victim host terminal mode on exit.
+struct RawGuard;
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
 }
 
-impl Victim {
-    pub fn new(wormhole: Wormhole, relay_hints: Vec<RelayHint>, abilities: Abilities) -> Self {
-        Self {
-            wormhole,
-            relay_hints,
-            abilities,
-        }
-    }
+#[derive(Default)]
+pub struct Victim;
 
-    pub async fn run(&mut self) -> Result<()> {
-        // ── 2. Create the PTY ─────────────────────────────────────────
-        // Start with a sane default; a Resize message arrives momentarily.
+impl Victim {
+    pub async fn run(transit: Transit) -> Result<()> {
+        let (mut tx, mut rx) = link::channel(transit);
+
+        // ── 1. Enable Raw Mode on Victim's local host terminal ─────
+        enable_raw_mode()?;
+        let _guard = RawGuard;
+
+        let (cols, rows) = size().unwrap_or((80, 24));
+
+        // ── 2. Initialize PTY ──────────────────────────────────────
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })?;
 
-        // ── 3. Spawn the best available shell ─────────────────────────
         let shell = find_shell();
         let mut cmd = CommandBuilder::new(&shell);
         cmd.env("TERM", "xterm-256color");
@@ -43,27 +47,16 @@ impl Victim {
             .slave
             .spawn_command(cmd)
             .with_context(|| format!("failed to spawn {shell}"))?;
-        drop(pair.slave); // slave side belongs to the child now
+        drop(pair.slave); // slave belongs to child now
 
         let master: Box<dyn MasterPty + Send> = pair.master;
         let mut pty_reader = master.try_clone_reader()?;
         let pty_writer = master.take_writer()?;
+        let mut stdout = std::io::stdout();
 
-        // ── 4. Optional: mirror to the victim's physical console ──────
-        let mut console = std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/tty")
-            .expect("TTY");
+        // ── 3. Threads for PTY Blocking I/O ───────────────────────
 
-        // let (cols, rows) = console_size().expect("valid console size");
-        // self.wormhole
-        //     .send(encode(&Msg::Resize { cols, rows })?)
-        //     .await?;
-
-        // ── 5. Bridge: PTY (blocking IO) <-> wormhole (async) ─────────
-        //
-        // portable-pty readers/writers are blocking, so we pump them on
-        // dedicated threads connected to the async world via channels.
+        // Reader Thread: PTY output -> async channel
         let (pty_out_tx, mut pty_out_rx) = mpsc::channel::<Vec<u8>>(64);
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -79,6 +72,7 @@ impl Victim {
             }
         });
 
+        // Writer Thread: async channel -> PTY input
         let (to_pty_tx, mut to_pty_rx) = mpsc::channel::<Vec<u8>>(64);
         let mut pty_writer = pty_writer;
         std::thread::spawn(move || {
@@ -89,21 +83,57 @@ impl Victim {
             }
         });
 
+        // Local Stdin Thread: Victim local typing -> async channel
+        let (local_in_tx, mut local_in_rx) = mpsc::channel::<Vec<u8>>(64);
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if local_in_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
         let mut child_exit = tokio::task::spawn_blocking(move || child.wait());
 
-        // ── 6. Main async loop ────────────────────────────────────────
+        #[cfg(unix)]
+        let mut sigwinch =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+
+        // ── 4. Main Event Multiplexer Loop ────────────────────────
         let result = loop {
+            #[cfg(unix)]
+            let sigwinch_recv = sigwinch.recv();
+            #[cfg(not(unix))]
+            let sigwinch_recv = std::future::pending::<Option<()>>();
+
             tokio::select! {
-                // Shell output -> helper (+ optional local mirror)
+                // Shell output -> Mirror locally AND send to Helper
                 Some(bytes) = pty_out_rx.recv() => {
-                    let _ = console.write_all(&bytes);
-                    self.wormhole.send(encode(&Msg::Data(bytes))?).await?;
+                    let _ = stdout.write_all(&bytes);
+                    let _ = stdout.flush();
+                    tx.send(&Msg::Data(bytes)).await?;
                 }
 
-                // Messages from the helper
-                incoming = self.wormhole.receive() => {
+                // Victim local typing -> Send to PTY
+                Some(bytes) = local_in_rx.recv() => {
+                    // Ctrl+] (0x1D) detaches locally
+                    if bytes.contains(&0x1d) {
+                        break Ok(());
+                    }
+                    to_pty_tx.send(bytes).await?;
+                }
+
+                // Remote messages from Helper -> Send to PTY / Resize
+                incoming = rx.recv() => {
                     match incoming {
-                        Ok(raw) => match decode(&raw)? {
+                        Ok(raw) => match raw {
                             Msg::Data(bytes) => {
                                 to_pty_tx.send(bytes).await?;
                             }
@@ -111,7 +141,6 @@ impl Victim {
                                 master.resize(PtySize {
                                     rows, cols, pixel_width: 0, pixel_height: 0,
                                 })?;
-                                // kernel delivers SIGWINCH to the shell itself
                             }
                             Msg::Bye => break Ok(()),
                         },
@@ -119,19 +148,29 @@ impl Victim {
                     }
                 }
 
-                // Shell exited -> we're done
+                // Victim window resized locally -> update PTY master
+                _ = sigwinch_recv => {
+                    if let Ok((cols, rows)) = size() {
+                        let _ = master.resize(PtySize {
+                            rows, cols, pixel_width: 0, pixel_height: 0,
+                        });
+                    }
+                }
+
+                // Child Shell exited
                 status = &mut child_exit => {
                     match status {
-                        Ok(Ok(_))     => {}                          // shell exited cleanly
-                        Ok(Err(e))    => eprintln!("wait failed: {e}"),   // wait() itself errored
-                        Err(join_err) => eprintln!("wait task: {join_err}"), // panicked
+                        Ok(Ok(_))     => {}
+                        Ok(Err(e))    => eprintln!("wait failed: {e}"),
+                        Err(join_err) => eprintln!("wait task: {join_err}"),
                     }
                     break Ok(());
                 }
             }
         };
 
-        let _ = self.wormhole.send(encode(&Msg::Bye)?).await;
+        let _ = tx.send(&Msg::Bye).await;
+        println!("\r\n[session ended]");
         result
     }
 }
@@ -147,5 +186,5 @@ fn find_shell() -> String {
             return c.into();
         }
     }
-    "sh".into() // PATH resolution as last resort
+    "sh".into()
 }

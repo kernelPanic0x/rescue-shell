@@ -1,3 +1,5 @@
+use magic_wormhole::transit;
+use serde::{Deserialize, Serialize};
 use wincode::{SchemaRead, SchemaWrite};
 
 /// Every message on the wire. The wormhole channel is already
@@ -22,4 +24,19 @@ pub fn encode(msg: &Msg) -> anyhow::Result<Vec<u8>> {
 
 pub fn decode(bytes: &[u8]) -> anyhow::Result<Msg> {
     Ok(wincode::deserialize(bytes)?)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Handshake {
+    pub abilities: transit::Abilities,
+    pub hints: transit::Hints,
+}
+
+impl Handshake {
+    pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
+        Ok(serde_json::to_vec(self)?)
+    }
+    pub fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
 }

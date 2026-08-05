@@ -2,6 +2,7 @@
 mod common;
 mod completer;
 mod helper;
+mod link;
 mod protocol;
 mod victim;
 
@@ -11,10 +12,10 @@ use clap::{Args, Parser, Subcommand};
 use magic_wormhole::{
     AppID, Code, MailboxConnection, Wormhole,
     transfer::APP_CONFIG,
-    transit::{self, RelayHint},
+    transit::{self, RelayHint, TransitRole},
 };
 
-use crate::{helper::Helper, victim::Victim};
+use crate::{common::establish_transit, helper::Helper, victim::Victim};
 
 #[derive(Parser)]
 #[command(about = "Remote rescue shell over magic-wormhole")]
@@ -98,8 +99,11 @@ async fn main() -> anyhow::Result<()> {
             println!("════════════════════════════════════════");
             println!("Waiting for them to connect...");
 
-            let wormhole = Wormhole::connect(mailbox).await?;
-            Victim::new(wormhole, relay_hints, abilities).run().await
+            let mut wormhole = Wormhole::connect(mailbox).await?;
+            let transit =
+                establish_transit(&mut wormhole, relay_hints, abilities, TransitRole::Leader)
+                    .await?;
+            Victim::run(transit).await
         }
         Cmd::Connect { common } => {
             let config = app_config(&common);
@@ -108,8 +112,11 @@ async fn main() -> anyhow::Result<()> {
 
             let code = Code::from_str(&completer::enter_code()?)?;
             let mailbox = MailboxConnection::connect(config, code, true).await?;
-            let wormhole = Wormhole::connect(mailbox).await?;
-            Helper::new(wormhole, relay_hints, abilities).run().await
+            let mut wormhole = Wormhole::connect(mailbox).await?;
+            let transit =
+                establish_transit(&mut wormhole, relay_hints, abilities, TransitRole::Follower)
+                    .await?;
+            Helper::run(transit).await
         }
     }
 }
