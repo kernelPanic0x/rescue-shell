@@ -8,6 +8,7 @@ use magic_wormhole::{
 use crate::protocol::Handshake;
 
 /// TIOCGWINSZ on /dev/tty — for size negotiation when mirroring.
+#[allow(unused)]
 pub fn console_size() -> Option<(u16, u16)> {
     use std::os::unix::io::AsRawFd;
     let f = std::fs::File::open("/dev/tty").ok()?;
