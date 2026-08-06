@@ -1,6 +1,6 @@
 use crate::{
     link,
-    protocol::{Msg, decode, encode},
+    protocol::Msg,
 };
 use anyhow::Result;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
@@ -86,13 +86,13 @@ impl Helper {
                             Msg::Bye => break Ok(()),
                             _ => {}
                         },
-                        Err(e) => break Err(e.into()),
+                        Err(e) => break Err(e),
                     }
                 }
             }
         };
 
-        let _ = tx.send(&Msg::Bye).await?;
+        tx.send(&Msg::Bye).await?;
         println!("\r\n[session ended]");
         result
     }

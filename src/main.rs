@@ -1,6 +1,7 @@
 // src/main.rs
 mod common;
 mod completer;
+mod display;
 mod helper;
 mod link;
 mod protocol;

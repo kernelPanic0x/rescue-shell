@@ -1,12 +1,11 @@
-use std::{pin::Pin, sync::Arc, task::Poll};
+use std::sync::Arc;
 
-use futures::{Sink, SinkExt, Stream, StreamExt, future::poll_fn, ready};
 use magic_wormhole::{
     Key, Wormhole,
     transit::{self, TransitKey, TransitRole},
 };
 
-use crate::protocol::{Handshake, Msg, decode, encode};
+use crate::protocol::Handshake;
 
 /// TIOCGWINSZ on /dev/tty — for size negotiation when mirroring.
 pub fn console_size() -> Option<(u16, u16)> {
@@ -30,7 +29,7 @@ pub async fn establish_transit(
     wormhole
         .send(
             Handshake {
-                abilities: connector.our_abilities().clone(),
+                abilities: *connector.our_abilities(),
                 hints: connector.our_hints().as_ref().clone(),
             }
             .encode()?,

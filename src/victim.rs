@@ -1,10 +1,6 @@
-use crate::{
-    link,
-    protocol::{Msg, decode},
-};
+use crate::{link, protocol::Msg};
 use anyhow::{Context, Result};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
-use futures::FutureExt;
 use magic_wormhole::transit::Transit;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -144,7 +140,7 @@ impl Victim {
                             }
                             Msg::Bye => break Ok(()),
                         },
-                        Err(e) => break Err(e.into()),
+                        Err(e) => break Err(e),
                     }
                 }
 
@@ -176,11 +172,10 @@ impl Victim {
 }
 
 fn find_shell() -> String {
-    if let Ok(s) = std::env::var("SHELL") {
-        if std::path::Path::new(&s).exists() {
+    if let Ok(s) = std::env::var("SHELL")
+        && std::path::Path::new(&s).exists() {
             return s;
         }
-    }
     for c in ["/bin/bash", "/bin/sh", "/bin/ash", "/bin/dash"] {
         if std::path::Path::new(c).exists() {
             return c.into();
