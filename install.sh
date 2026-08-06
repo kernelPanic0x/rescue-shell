@@ -2,7 +2,15 @@
 # usage: curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | bash
 set -euo pipefail
 
-TUPLE="$(uname -m)-unknown-linux-musl"
+ARCH="$(uname -m)"
+
+case "$ARCH" in
+    x86_64)               TUPLE="x86_64-unknown-linux-musl" ;;
+    aarch64)              TUPLE="aarch64-unknown-linux-musl" ;;
+    armv6l|armv7l|armv8l) TUPLE="arm-unknown-linux-musleabihf" ;;
+    *)                    die "unsupported architecture: $ARCH" ;;
+esac
+
 URL="https://github.com/kernelPanic0x/rescue-shell/releases/download/latest/rescue-shell-${TUPLE}"
 
 log() { printf '[*] %s\n' "$*" >&2; }
