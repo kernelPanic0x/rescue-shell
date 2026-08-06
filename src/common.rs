@@ -42,7 +42,7 @@ pub async fn establish_transit(
     // 4. Derive the transit key from the wormhole session key.
     let transit_key: Key<TransitKey> = wormhole
         .key()
-        .derive_subkey_from_purpose::<TransitKey>("transit_key");
+        .derive_subkey_from_purpose::<TransitKey>("rescue-shell");
 
     // 5. Connect. Leader/Follower must not both be the same.
     let (transit, info) = connector
