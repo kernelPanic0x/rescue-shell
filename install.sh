@@ -24,7 +24,6 @@ case "$OS" in
     FreeBSD)
         case "$ARCH" in
             amd64|x86_64) TUPLE="x86_64-unknown-freebsd" ;;
-            aarch64|arm64) TUPLE="aarch64-unknown-freebsd" ;;
             *)            die "unsupported FreeBSD architecture: $ARCH" ;;
         esac
         ;;
