@@ -24,6 +24,8 @@ jobs:
           - arm-unknown-linux-musleabihf
           - x86_64-apple-darwin
           - aarch64-apple-darwin
+          - x86_64-unknown-freebsd
+          - aarch64-unknown-freebsd
 
     steps:
       - name: Checkout code

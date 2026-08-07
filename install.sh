@@ -21,6 +21,13 @@ case "$OS" in
             *)      die "unsupported macOS architecture: $ARCH" ;;
         esac
         ;;
+    FreeBSD)
+        case "$ARCH" in
+            amd64|x86_64) TUPLE="x86_64-unknown-freebsd" ;;
+            aarch64|arm64) TUPLE="aarch64-unknown-freebsd" ;;
+            *)            die "unsupported FreeBSD architecture: $ARCH" ;;
+        esac
+        ;;
     *)
         die "unsupported operating system: $OS"
         ;;
