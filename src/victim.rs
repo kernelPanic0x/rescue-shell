@@ -57,7 +57,7 @@ impl Victim {
 
         // Reader Thread: PTY output -> async channel
         let (pty_out_tx, mut pty_out_rx) = mpsc::channel::<Vec<u8>>(64);
-        std::thread::spawn(move || {
+        tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 8192];
             loop {
                 match pty_reader.read(&mut buf) {
@@ -74,7 +74,7 @@ impl Victim {
         // Writer Thread: async channel -> PTY input
         let (to_pty_tx, mut to_pty_rx) = mpsc::channel::<Vec<u8>>(64);
         let mut pty_writer = pty_writer;
-        std::thread::spawn(move || {
+        tokio::task::spawn_blocking(move || {
             while let Some(bytes) = to_pty_rx.blocking_recv() {
                 if pty_writer.write_all(&bytes).is_err() {
                     break;
