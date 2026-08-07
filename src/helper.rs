@@ -1,8 +1,9 @@
 use crate::{common::is_detach_key, link, osc_filter::OscFilter, protocol::Msg};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use magic_wormhole::transit::Transit;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::io::{Read, Write};
+use tokio::sync::mpsc;
 
 /// Restore the terminal no matter how we exit.
 struct RawGuard;
@@ -29,11 +30,38 @@ impl Helper {
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
 
-        let mut filter = OscFilter::default();
-        let mut stdout = tokio::io::stdout();
-        let mut stdin = tokio::io::stdin();
-        let mut buf = [0u8; 1024];
+        // ── 1. Stdin Reader Thread ─────────────────────────────────
+        // Use std::thread so Tokio runtime shutdown won't wait for the read() syscall on exit.
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
 
+        // ── 2. Stdout Writer Thread ────────────────────────────────
+        let (stdout_tx, mut stdout_rx) = mpsc::channel::<Vec<u8>>(64);
+        tokio::task::spawn_blocking(move || {
+            let mut stdout = std::io::stdout();
+            while let Some(bytes) = stdout_rx.blocking_recv() {
+                if stdout.write_all(&bytes).is_err() || stdout.flush().is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut filter = OscFilter::default();
+
+        // ── 3. Main Event Loop ─────────────────────────────────────
         let result = loop {
             #[cfg(unix)]
             let sigwinch_recv = sigwinch.recv();
@@ -41,26 +69,19 @@ impl Helper {
             let sigwinch_recv = std::future::pending::<Option<()>>();
 
             tokio::select! {
-                // Raw stdin bytes -> victim
-                res = stdin.read(&mut buf) => {
-                    match res {
-                        Ok(0) => bail!("No more input from stdin"),
-                        Ok(n) => {
-                            let bytes = buf[..n].to_vec();
-                            let bytes = filter.filter(&bytes);
+                // Raw stdin bytes -> filter -> send to victim
+                Some(raw_bytes) = stdin_rx.recv() => {
+                    let bytes = filter.filter(&raw_bytes);
 
-                            if bytes.is_empty() {
-                                continue;
-                            }
-
-                            if is_detach_key(&bytes) {
-                                break Ok(());
-                            }
-
-                            tx.send(&Msg::Data(bytes)).await?;
-                        }
-                        Err(e) => bail!(e),
+                    if bytes.is_empty() {
+                        continue;
                     }
+
+                    if is_detach_key(&bytes) {
+                        break Ok(());
+                    }
+
+                    tx.send(&Msg::Data(bytes)).await?;
                 }
 
                 // Window resize signal (SIGWINCH)
@@ -75,8 +96,7 @@ impl Helper {
                     match incoming {
                         Ok(raw) => match raw {
                             Msg::Data(bytes) => {
-                                stdout.write_all(&bytes).await?;
-                                stdout.flush().await?;
+                                let _ = stdout_tx.send(bytes).await;
                             }
                             Msg::Bye => break Ok(()),
                             _ => {}
@@ -87,8 +107,8 @@ impl Helper {
             }
         };
 
-        println!("[session ended]");
-        tx.send(&Msg::Bye).await?;
+        let _ = tx.send(&Msg::Bye).await;
+        println!("\r\n[session ended]");
         result
     }
 }

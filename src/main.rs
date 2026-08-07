@@ -109,8 +109,7 @@ async fn main() -> anyhow::Result<()> {
             let transit =
                 establish_transit(&mut wormhole, relay_hints, abilities, TransitRole::Leader)
                     .await?;
-            Victim::run(transit).await?;
-            std::process::exit(0);
+            Victim::run(transit).await
         }
         Cmd::Connect { common } => {
             let config = app_config(&common);
@@ -123,8 +122,7 @@ async fn main() -> anyhow::Result<()> {
             let transit =
                 establish_transit(&mut wormhole, relay_hints, abilities, TransitRole::Follower)
                     .await?;
-            Helper::run(transit).await?;
-            std::process::exit(0);
+            Helper::run(transit).await
         }
         Cmd::Copy => copy_to_osc52(),
     }

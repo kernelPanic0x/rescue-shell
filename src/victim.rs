@@ -1,13 +1,10 @@
 use crate::{common::is_detach_key, link, protocol::Msg};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use magic_wormhole::transit::Transit;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::mpsc,
-};
+use tokio::sync::mpsc;
 
 /// Restore Victim host terminal mode on exit.
 struct RawGuard;
@@ -53,9 +50,9 @@ impl Victim {
         let mut pty_reader = master.try_clone_reader()?;
         let pty_writer = master.take_writer()?;
 
-        // ── 3. Threads for PTY Blocking I/O ───────────────────────
+        // ── 3. Threads for I/O ────────────────────────────────────
 
-        // Reader Thread: PTY output -> async channel
+        // PTY Reader Thread: PTY output -> async channel
         let (pty_out_tx, mut pty_out_rx) = mpsc::channel::<Vec<u8>>(64);
         tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 8192];
@@ -71,12 +68,40 @@ impl Victim {
             }
         });
 
-        // Writer Thread: async channel -> PTY input
+        // PTY Writer Thread: async channel -> PTY input
         let (to_pty_tx, mut to_pty_rx) = mpsc::channel::<Vec<u8>>(64);
         let mut pty_writer = pty_writer;
         tokio::task::spawn_blocking(move || {
             while let Some(bytes) = to_pty_rx.blocking_recv() {
                 if pty_writer.write_all(&bytes).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Stdin Reader Thread: std::thread so Tokio doesn't block on exit
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Local Stdout Writer Thread
+        let (stdout_tx, mut stdout_rx) = mpsc::channel::<Vec<u8>>(64);
+        tokio::task::spawn_blocking(move || {
+            let mut stdout = std::io::stdout();
+            while let Some(bytes) = stdout_rx.blocking_recv() {
+                if stdout.write_all(&bytes).is_err() || stdout.flush().is_err() {
                     break;
                 }
             }
@@ -88,10 +113,6 @@ impl Victim {
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
 
-        let mut stdout = tokio::io::stdout();
-        let mut stdin = tokio::io::stdin();
-        let mut buf = [0u8; 1024];
-
         // ── 4. Main Event Multiplexer Loop ────────────────────────
         let result = loop {
             #[cfg(unix)]
@@ -102,26 +123,16 @@ impl Victim {
             tokio::select! {
                 // Shell output -> Mirror locally AND send to Helper
                 Some(bytes) = pty_out_rx.recv() => {
-                    stdout.write_all(&bytes).await?;
-                    stdout.flush().await?;
+                    let _ = stdout_tx.send(bytes.clone()).await;
                     tx.send(&Msg::Data(bytes)).await?;
                 }
 
                 // Victim local typing -> Send to PTY
-                res = stdin.read(&mut buf) => {
-                    match res {
-                        Ok(0) => bail!("No more input on stdin"),
-                        Ok(n) => {
-                            let bytes = buf[..n].to_vec();
-
-                            if is_detach_key(&bytes) {
-                                break Ok(());
-                            }
-
-                            to_pty_tx.send(bytes).await?;
-                        }
-                        Err(e) => bail!(e),
+                Some(bytes) = stdin_rx.recv() => {
+                    if is_detach_key(&bytes) {
+                        break Ok(());
                     }
+                    to_pty_tx.send(bytes).await?;
                 }
 
                 // Remote messages from Helper -> Send to PTY / Resize
@@ -163,8 +174,8 @@ impl Victim {
             }
         };
 
-        println!("[session ended]");
-        tx.send(&Msg::Bye).await?;
+        let _ = tx.send(&Msg::Bye).await;
+        println!("\r\n[session ended]");
         result
     }
 }
