@@ -18,7 +18,7 @@ die() { printf '[!] %s\n' "$*" >&2; exit 1; }
 
 log "target: ${TUPLE}"
 
-BIN="$(mktemp "${TMPDIR:-/tmp}/rescue-shell.XXXXXX")" || die "no writable temp dir"
+BIN="$(mktemp "${TMPDIR:-/tmp}/rescue-shell")" || die "no writable temp dir"
 trap 'rm -f "$BIN"' EXIT
 
 log "downloading ${URL}"
