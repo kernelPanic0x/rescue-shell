@@ -49,6 +49,10 @@ impl Helper {
                             let bytes = buf[..n].to_vec();
                             let bytes = filter.filter(&bytes);
 
+                            if bytes.is_empty() {
+                                continue;
+                            }
+
                             if is_detach_key(&bytes) {
                                 break Ok(());
                             }
