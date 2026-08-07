@@ -28,14 +28,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Create a session
     Serve {
         #[command(flatten)]
         common: CommonArgs,
     },
+    /// Connect to a session
     Connect {
         #[command(flatten)]
         common: CommonArgs,
     },
+    /// Copys stdin to OSC52 for remote clipboard
     Copy,
 }
 

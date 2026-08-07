@@ -27,9 +27,14 @@ chmod 700 "$BIN"
 
 export WORMHOLE_RELAY_URL="${WORMHOLE_RELAY_URL:-tcp://nbg.ell.dns64.de:4001}"
 
+# If no arguments were passed to the script, default to "serve"
+if [ "$#" -eq 0 ]; then
+    set -- serve
+fi
+
 # </dev/tty only on the child: bash itself must keep reading the script from the pipe
 if [ -r /dev/tty ]; then
-    "$BIN" serve "$@" </dev/tty
+    "$BIN" "$@" </dev/tty
 else
-    "$BIN" serve "$@"
+    "$BIN" "$@"
 fi
