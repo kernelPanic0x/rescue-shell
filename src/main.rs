@@ -4,6 +4,7 @@ mod completer;
 mod helper;
 mod link;
 mod osc52;
+mod osc_filter;
 mod protocol;
 mod victim;
 

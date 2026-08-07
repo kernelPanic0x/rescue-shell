@@ -1,4 +1,4 @@
-use crate::{common::is_detach_key, link, protocol::Msg};
+use crate::{common::is_detach_key, link, osc_filter::OscFilter, protocol::Msg};
 use anyhow::{Result, bail};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use magic_wormhole::transit::Transit;
@@ -29,6 +29,7 @@ impl Helper {
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
 
+        let mut filter = OscFilter::default();
         let mut stdout = tokio::io::stdout();
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 1024];
@@ -46,6 +47,7 @@ impl Helper {
                         Ok(0) => bail!("No more input from stdin"),
                         Ok(n) => {
                             let bytes = buf[..n].to_vec();
+                            let bytes = filter.filter(&bytes);
 
                             if is_detach_key(&bytes) {
                                 break Ok(());
