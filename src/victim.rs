@@ -1,10 +1,13 @@
-use crate::{link, protocol::Msg};
-use anyhow::{Context, Result};
+use crate::{common::is_detach_key, link, protocol::Msg};
+use anyhow::{Context, Result, bail};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use magic_wormhole::transit::Transit;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use tokio::sync::mpsc;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::mpsc,
+};
 
 /// Restore Victim host terminal mode on exit.
 struct RawGuard;
@@ -49,7 +52,6 @@ impl Victim {
         let master: Box<dyn MasterPty + Send> = pair.master;
         let mut pty_reader = master.try_clone_reader()?;
         let pty_writer = master.take_writer()?;
-        let mut stdout = std::io::stdout();
 
         // ── 3. Threads for PTY Blocking I/O ───────────────────────
 
@@ -80,28 +82,15 @@ impl Victim {
             }
         });
 
-        // Local Stdin Thread: Victim local typing -> async channel
-        let (local_in_tx, mut local_in_rx) = mpsc::channel::<Vec<u8>>(64);
-        std::thread::spawn(move || {
-            let mut stdin = std::io::stdin();
-            let mut buf = [0u8; 1024];
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if local_in_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
         let mut child_exit = tokio::task::spawn_blocking(move || child.wait());
 
         #[cfg(unix)]
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+
+        let mut stdout = tokio::io::stdout();
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 1024];
 
         // ── 4. Main Event Multiplexer Loop ────────────────────────
         let result = loop {
@@ -113,18 +102,26 @@ impl Victim {
             tokio::select! {
                 // Shell output -> Mirror locally AND send to Helper
                 Some(bytes) = pty_out_rx.recv() => {
-                    let _ = stdout.write_all(&bytes);
-                    let _ = stdout.flush();
+                    stdout.write_all(&bytes).await?;
+                    stdout.flush().await?;
                     tx.send(&Msg::Data(bytes)).await?;
                 }
 
                 // Victim local typing -> Send to PTY
-                Some(bytes) = local_in_rx.recv() => {
-                    // Ctrl+] (0x1D) detaches locally
-                    if bytes.contains(&0x1d) {
-                        break Ok(());
+                res = stdin.read(&mut buf) => {
+                    match res {
+                        Ok(0) => bail!("No more input on stdin"),
+                        Ok(n) => {
+                            let bytes = buf[..n].to_vec();
+
+                            if is_detach_key(&bytes) {
+                                break Ok(());
+                            }
+
+                            to_pty_tx.send(bytes).await?;
+                        }
+                        Err(e) => bail!(e),
                     }
-                    to_pty_tx.send(bytes).await?;
                 }
 
                 // Remote messages from Helper -> Send to PTY / Resize

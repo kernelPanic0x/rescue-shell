@@ -7,6 +7,11 @@ use magic_wormhole::{
 
 use crate::protocol::Handshake;
 
+pub fn is_detach_key(bytes: &[u8]) -> bool {
+    // Ctrl+] (0x1D) detaches locally
+    bytes.contains(&0x1d)
+}
+
 /// TIOCGWINSZ on /dev/tty — for size negotiation when mirroring.
 #[allow(unused)]
 pub fn console_size() -> Option<(u16, u16)> {

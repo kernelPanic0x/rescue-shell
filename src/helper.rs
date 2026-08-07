@@ -1,4 +1,4 @@
-use crate::{link, protocol::Msg};
+use crate::{common::is_detach_key, link, protocol::Msg};
 use anyhow::{Result, bail};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use magic_wormhole::transit::Transit;
@@ -47,8 +47,7 @@ impl Helper {
                         Ok(n) => {
                             let bytes = buf[..n].to_vec();
 
-                            // Ctrl+] is ASCII 0x1D (29) -> Detach shortcut
-                            if bytes.contains(&0x1d) {
+                            if is_detach_key(&bytes) {
                                 break Ok(());
                             }
 
