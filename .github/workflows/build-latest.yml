@@ -38,12 +38,9 @@ jobs:
       - name: Build with cargo-zigbuild
         run: cargo zigbuild --release --target ${{ matrix.target }}
 
-      - name: Compress with UPX and prepare artifact
+      - name: Prepare artifact
         run: |
-          sudo apt-get update && sudo apt-get install -y upx-ucl
-          BIN_PATH=$(find target/${{ matrix.target }}/release -maxdepth 1 -type f -executable ! -name "*.d" | head -n 1)
-          upx --best --lzma "$BIN_PATH"
-          cp "$BIN_PATH" ./${{ env.BINARY_NAME }}-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} ./${{ env.BINARY_NAME }}-${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7.0.1
