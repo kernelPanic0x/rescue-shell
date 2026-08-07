@@ -1,12 +1,8 @@
-use crate::{
-    link,
-    protocol::Msg,
-};
-use anyhow::Result;
+use crate::{link, protocol::Msg};
+use anyhow::{Result, bail};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use magic_wormhole::transit::Transit;
-use std::io::{Read, Write};
-use tokio::sync::mpsc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Restore the terminal no matter how we exit.
 struct RawGuard;
@@ -29,28 +25,13 @@ impl Helper {
         let (cols, rows) = size()?;
         tx.send(&Msg::Resize { cols, rows }).await?;
 
-        let mut stdout = std::io::stdout();
-
-        // Pump raw stdin bytes to an async channel
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
-        std::thread::spawn(move || {
-            let mut stdin = std::io::stdin();
-            let mut buf = [0u8; 1024];
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
         #[cfg(unix)]
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+
+        let mut stdout = tokio::io::stdout();
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 1024];
 
         let result = loop {
             #[cfg(unix)]
@@ -60,12 +41,21 @@ impl Helper {
 
             tokio::select! {
                 // Raw stdin bytes -> victim
-                Some(bytes) = stdin_rx.recv() => {
-                    // Ctrl+] is ASCII 0x1D (29) -> Detach shortcut
-                    if bytes.contains(&0x1d) {
-                        break Ok(());
+                res = stdin.read(&mut buf) => {
+                    match res {
+                        Ok(0) => bail!("No more input from stdin"),
+                        Ok(n) => {
+                            let bytes = buf[..n].to_vec();
+
+                            // Ctrl+] is ASCII 0x1D (29) -> Detach shortcut
+                            if bytes.contains(&0x1d) {
+                                break Ok(());
+                            }
+
+                            tx.send(&Msg::Data(bytes)).await?;
+                        }
+                        Err(e) => bail!(e),
                     }
-                    tx.send(&Msg::Data(bytes)).await?;
                 }
 
                 // Window resize signal (SIGWINCH)
@@ -80,8 +70,8 @@ impl Helper {
                     match incoming {
                         Ok(raw) => match raw {
                             Msg::Data(bytes) => {
-                                stdout.write_all(&bytes)?;
-                                stdout.flush()?;
+                                stdout.write_all(&bytes).await?;
+                                stdout.flush().await?;
                             }
                             Msg::Bye => break Ok(()),
                             _ => {}
