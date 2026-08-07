@@ -41,7 +41,7 @@ impl OscFilter {
                         b'[' => self.state = State::CsiPrefix,
                         _ => {
                             // Not an OSC or CSI sequence, flush pending bytes & return to Normal
-                            output.extend(self.pending.drain(..));
+                            output.append(&mut self.pending);
                             self.state = State::Normal;
                         }
                     }
@@ -56,7 +56,7 @@ impl OscFilter {
                         self.state = State::InOsc;
                     } else if self.pending.len() >= 6 {
                         // Not an OSC 10/11 query, flush pending bytes & return to Normal
-                        output.extend(self.pending.drain(..));
+                        output.append(&mut self.pending);
                         self.state = State::Normal;
                     }
                 }
@@ -93,7 +93,7 @@ impl OscFilter {
                         self.state = State::InDa;
                     } else {
                         // Not a DA query, flush pending bytes & return to Normal
-                        output.extend(self.pending.drain(..));
+                        output.append(&mut self.pending);
                         self.state = State::Normal;
                     }
                 }
