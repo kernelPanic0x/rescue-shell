@@ -163,8 +163,8 @@ impl Victim {
             }
         };
 
-        let _ = tx.send(&Msg::Bye).await;
-        println!("\r\n[session ended]");
+        println!("[session ended]");
+        tx.send(&Msg::Bye).await?;
         result
     }
 }

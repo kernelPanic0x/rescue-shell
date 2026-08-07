@@ -87,8 +87,8 @@ impl Helper {
             }
         };
 
+        println!("[session ended]");
         tx.send(&Msg::Bye).await?;
-        println!("\r\n[session ended]");
         result
     }
 }
