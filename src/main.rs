@@ -3,6 +3,7 @@ mod common;
 mod completer;
 mod helper;
 mod link;
+mod osc52;
 mod protocol;
 mod victim;
 
@@ -15,7 +16,7 @@ use magic_wormhole::{
     transit::{self, RelayHint, TransitRole},
 };
 
-use crate::{common::establish_transit, helper::Helper, victim::Victim};
+use crate::{common::establish_transit, helper::Helper, osc52::copy_to_osc52, victim::Victim};
 
 #[derive(Parser)]
 #[command(about = "Remote rescue shell over magic-wormhole")]
@@ -34,6 +35,7 @@ enum Cmd {
         #[command(flatten)]
         common: CommonArgs,
     },
+    Copy,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -118,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
                     .await?;
             Helper::run(transit).await
         }
+        Cmd::Copy => copy_to_osc52(),
     }
 }
 
