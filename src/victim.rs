@@ -37,8 +37,9 @@ impl Victim {
         })?;
 
         let shell = find_shell();
+        let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
         let mut cmd = CommandBuilder::new(&shell);
-        cmd.env("TERM", "xterm-256color");
+        cmd.env("TERM", term);
         let mut child = pair
             .slave
             .spawn_command(cmd)
@@ -173,9 +174,10 @@ impl Victim {
 
 fn find_shell() -> String {
     if let Ok(s) = std::env::var("SHELL")
-        && std::path::Path::new(&s).exists() {
-            return s;
-        }
+        && std::path::Path::new(&s).exists()
+    {
+        return s;
+    }
     for c in ["/bin/bash", "/bin/sh", "/bin/ash", "/bin/dash"] {
         if std::path::Path::new(c).exists() {
             return c.into();
