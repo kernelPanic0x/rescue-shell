@@ -1,11 +1,13 @@
 // src/main.rs
 mod common;
 mod completer;
+mod connection;
 mod helper;
 mod link;
 mod osc52;
 mod osc_filter;
 mod protocol;
+mod screen;
 mod victim;
 
 use std::{borrow::Cow, str::FromStr};
@@ -94,22 +96,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Serve { common } => {
             let config = app_config(&common);
-            let relay_hints = parse_relay_hints(&common.relay_server)?;
-            let abilities = parse_transit_args(&common);
-
-            let mailbox = MailboxConnection::create(config, 2).await?;
-            let code = mailbox.code().clone();
-            println!("════════════════════════════════════════");
-            println!("  Give this code to your helper:");
-            println!("      {code}");
-            println!("════════════════════════════════════════");
-            println!("Waiting for them to connect...");
-
-            let mut wormhole = Wormhole::connect(mailbox).await?;
-            let transit =
-                establish_transit(&mut wormhole, relay_hints, abilities, TransitRole::Leader)
-                    .await?;
-            Victim::run(transit).await
+            Victim::run(config).await
         }
         Cmd::Connect { common } => {
             let config = app_config(&common);

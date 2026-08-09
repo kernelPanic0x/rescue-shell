@@ -1,0 +1,112 @@
+use std::fmt;
+
+use crossterm::{
+    cursor::MoveTo,
+    queue,
+    style::{Print, SetAttribute, Stylize},
+    terminal::Clear,
+};
+use magic_wormhole::Code;
+use tokio::sync::{mpsc, watch};
+
+#[derive(Clone, Debug)]
+pub enum Role {
+    Victim,
+    Helper,
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Role::Victim => write!(f, "Victim"),
+            Role::Helper => write!(f, "Helper"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StatusBarState {
+    code: Option<Code>,
+    role: Role,
+}
+
+impl StatusBarState {
+    fn new(role: Role) -> Self {
+        Self { code: None, role }
+    }
+
+    pub fn render_to(&self, buf: &mut Vec<u8>, cols: u16) {
+        let code = match &self.code {
+            Some(code) => code.to_string(),
+            None => "No code yet".to_string(),
+        };
+
+        let title = format!("rescue-shell {}", env!("CARGO_PKG_VERSION"));
+        let role = self.role.to_string();
+        let raw_text = format!("{} | {} | {}", code, title, role);
+
+        let width = cols as usize;
+        let char_count = raw_text.chars().count();
+
+        // Safely truncate UTF-8 string or pad to width
+        let padded_text = if char_count > width {
+            raw_text.chars().take(width).collect::<String>()
+        } else {
+            format!("{:<width$}", raw_text, width = width)
+        };
+
+        // Render at top row (Row 0, Col 0 in 0-based crossterm coordinates)
+        let _ = queue!(buf, MoveTo(0, 0), Print(padded_text.black().on_white()));
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StatusBarHandle {
+    tx: watch::Sender<StatusBarState>,
+}
+
+impl StatusBarHandle {
+    pub fn new(role: Role) -> (Self, watch::Receiver<StatusBarState>) {
+        let (tx, rx) = watch::channel(StatusBarState::new(role));
+        (Self { tx }, rx)
+    }
+
+    pub fn set_code(&self, code: Code) {
+        self.tx.send_modify(|s| s.code = Some(code));
+    }
+}
+
+pub fn render_local_screen(
+    parser: &vt100::Parser,
+    status_bar: &StatusBarState,
+    cols: u16,
+    total_rows: u16,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // 1. Draw status bar on physical Row 0
+    status_bar.render_to(&mut buf, cols);
+
+    // 2. Draw VT100 rows starting on physical Row 1
+    let screen = parser.screen();
+    for (r, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
+        let physical_row = (r as u16) + 1;
+        if physical_row >= total_rows {
+            break;
+        }
+
+        // Move to row AND clear line to the right before drawing
+        let _ = queue!(
+            buf,
+            MoveTo(0, physical_row),
+            Clear(crossterm::terminal::ClearType::UntilNewLine)
+        );
+        buf.extend_from_slice(&row_bytes);
+    }
+
+    // 3. Move terminal cursor to virtual cursor position
+    let (cur_r, cur_c) = screen.cursor_position();
+    let _ = queue!(buf, MoveTo(cur_c, cur_r + 1));
+
+    buf
+}

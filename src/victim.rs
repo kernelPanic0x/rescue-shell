@@ -1,10 +1,26 @@
-use crate::{common::is_detach_key, link, protocol::Msg};
+use crate::protocol::{decode, encode};
+use crate::screen::{Role, StatusBarHandle, StatusBarState, render_local_screen};
+use crate::{common::is_detach_key, protocol::Msg};
+use anyhow::anyhow;
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
-use magic_wormhole::transit::Transit;
+use futures::SinkExt;
+use futures::StreamExt;
+use futures::future::{join, select_all};
+use iroh::{
+    Endpoint, SecretKey,
+    endpoint::{Connection, presets},
+    protocol::{AcceptError, ProtocolHandler, Router},
+};
+use magic_wormhole::{AppConfig, Code, MailboxConnection, Wormhole, transfer::AppVersion};
+use n0_error::AnyError;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use std::borrow::Borrow;
 use std::io::{Read, Write};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
+use tokio_serde::{SymmetricallyFramed, formats::SymmetricalBincode};
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 /// Restore Victim host terminal mode on exit.
 struct RawGuard;
@@ -14,18 +30,135 @@ impl Drop for RawGuard {
     }
 }
 
-#[derive(Default)]
-pub struct Victim;
+#[derive(Debug)]
+struct Protocol {
+    from_helper: mpsc::Sender<Msg>,
+    to_helpers: broadcast::Sender<Msg>,
+}
+
+impl Protocol {
+    fn new(to_helpers: broadcast::Sender<Msg>, from_helper: mpsc::Sender<Msg>) -> Self {
+        Self {
+            from_helper,
+            to_helpers,
+        }
+    }
+}
+
+impl ProtocolHandler for Protocol {
+    async fn accept(&self, c: Connection) -> Result<(), AcceptError> {
+        if c.alpn() != b"rescue-shell" {
+            return Err(AcceptError::NotAllowed {
+                meta: n0_error::Meta::default(),
+            });
+        }
+
+        let mut to_helpers = self.to_helpers.subscribe();
+        let from_helper = self.from_helper.clone();
+
+        let (tx, rx) = c.accept_bi().await?;
+        let mut raw_writer = tokio_util::codec::FramedWrite::new(tx, LengthDelimitedCodec::new());
+        let mut raw_reader = tokio_util::codec::FramedRead::new(rx, LengthDelimitedCodec::new());
+
+        // Helper -> Victim
+        let helper_victim = tokio::spawn(async move {
+            loop {
+                let bytes = raw_reader.next().await.ok_or(anyhow!("reader is none"))??;
+                let msg = decode(&bytes)?;
+                from_helper.send(msg).await?;
+            }
+
+            #[allow(unreachable_code)]
+            Ok::<(), anyhow::Error>(())
+        });
+
+        // Victim -> Helpers
+        let victim_helper = tokio::spawn(async move {
+            loop {
+                let msg = to_helpers.recv().await?;
+                raw_writer.send(Bytes::from(encode(&msg)?)).await?;
+            }
+
+            #[allow(unreachable_code)]
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (res, _, _) = futures::future::select_all(vec![victim_helper, helper_victim]).await;
+        if let Err(e) = res {
+            return Err(AcceptError::User {
+                source: n0_error::AnyError::from_std(e),
+                meta: n0_error::Meta::default(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Link {
+    secret_key: SecretKey,
+    router: Router,
+}
+
+impl Link {
+    async fn new(
+        app_config: AppConfig<AppVersion>,
+        protocol: Protocol,
+        statusbar_handle: StatusBarHandle,
+    ) -> anyhow::Result<Self> {
+        let secret_key = SecretKey::generate();
+        let public_key = secret_key.public();
+
+        let ep = Endpoint::builder(presets::N0)
+            .secret_key(secret_key.clone())
+            .bind()
+            .await?;
+
+        let router = Router::builder(ep)
+            .accept(b"rescue-shell", protocol)
+            .spawn();
+
+        tokio::task::spawn(async move {
+            loop {
+                let _ = async {
+                    let mailbox = MailboxConnection::create(app_config.clone(), 2).await?;
+                    let code = mailbox.code();
+                    statusbar_handle.set_code(code.clone());
+
+                    let mut wormhole = Wormhole::connect(mailbox).await?;
+                    wormhole.send(public_key.as_bytes().to_vec()).await?;
+
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await;
+            }
+        });
+
+        Ok(Self { secret_key, router })
+    }
+}
+
+#[derive(Debug)]
+pub struct Victim {
+    code: Code,
+}
 
 impl Victim {
-    pub async fn run(transit: Transit) -> Result<()> {
-        let (mut tx, mut rx) = link::channel(transit);
-
-        // ── 1. Enable Raw Mode on Victim's local host terminal ─────
+    pub async fn run(app_config: AppConfig<AppVersion>) -> Result<()> {
         enable_raw_mode()?;
         let _guard = RawGuard;
 
-        let (cols, rows) = size().unwrap_or((80, 24));
+        let (mut cols, mut rows) = size().unwrap_or((80, 24));
+        let mut pty_rows = rows.saturating_sub(1).max(1);
+        let mut vt_parser = vt100::Parser::new(pty_rows, cols, 1000);
+        let (statusbar_handle, mut statusbar_rx) = StatusBarHandle::new(Role::Victim);
+
+        // Link channels
+        let to_helpers = broadcast::Sender::<Msg>::new(100);
+        let (from_helper_tx, mut from_helper_rx) = mpsc::channel::<Msg>(100);
+        let protocol = Protocol::new(to_helpers.clone(), from_helper_tx);
+        let _link = Link::new(app_config, protocol, statusbar_handle).await?;
 
         // ── 2. Initialize PTY ──────────────────────────────────────
         let pty_system = native_pty_system();
@@ -121,10 +254,20 @@ impl Victim {
             let sigwinch_recv = std::future::pending::<Option<()>>();
 
             tokio::select! {
-                // Shell output -> Mirror locally AND send to Helper
+                // statusbar update
+                _ = statusbar_rx.changed() => {
+                    let state = statusbar_rx.borrow();
+                    let frame = render_local_screen(&vt_parser, &state, cols, rows);
+                    let _ = stdout_tx.send(frame).await?;
+                }
+
+                // Shell output -> Mirror locally AND send to Helpers
                 Some(bytes) = pty_out_rx.recv() => {
-                    let _ = stdout_tx.send(bytes.clone()).await;
-                    tx.send(&Msg::Data(bytes)).await?;
+                    vt_parser.process(&bytes);
+                    let state = statusbar_rx.borrow();
+                    let frame = render_local_screen(&vt_parser, &state, cols, rows);
+                    let _ = stdout_tx.send(frame).await?;
+                    let _ = to_helpers.send(Msg::Data(bytes));
                 }
 
                 // Victim local typing -> Send to PTY
@@ -136,9 +279,9 @@ impl Victim {
                 }
 
                 // Remote messages from Helper -> Send to PTY / Resize
-                incoming = rx.recv() => {
+                incoming = from_helper_rx.recv() => {
                     match incoming {
-                        Ok(raw) => match raw {
+                        Some(msg) => match msg {
                             Msg::Data(bytes) => {
                                 to_pty_tx.send(bytes).await?;
                             }
@@ -147,18 +290,29 @@ impl Victim {
                                     rows, cols, pixel_width: 0, pixel_height: 0,
                                 })?;
                             }
-                            Msg::Bye => break Ok(()),
+                            Msg::Bye => {},
                         },
-                        Err(e) => break Err(e),
+                        None => unreachable!("broadcast channel can't be invalid"),
                     }
                 }
 
-                // Victim window resized locally -> update PTY master
+                // Window resized locally -> update PTY & VT Parser
                 _ = sigwinch_recv => {
-                    if let Ok((cols, rows)) = size() {
+                    if let Ok((new_cols, new_rows)) = size() {
+                        cols = new_cols;
+                        rows = new_rows;
+                        pty_rows = rows.saturating_sub(1).max(1);
+
                         let _ = master.resize(PtySize {
-                            rows, cols, pixel_width: 0, pixel_height: 0,
+                            rows: pty_rows, cols, pixel_width: 0, pixel_height: 0,
                         });
+
+                        vt_parser.screen_mut().set_size(pty_rows, cols);
+                        let state = statusbar_rx.borrow();
+
+                        // Redraw screen on resize
+                        let frame = render_local_screen(&vt_parser, &state, cols, rows);
+                        let _ = stdout_tx.send(frame).await?;
                     }
                 }
 
@@ -174,7 +328,7 @@ impl Victim {
             }
         };
 
-        let _ = tx.send(&Msg::Bye).await;
+        let _ = to_helpers.send(Msg::Bye);
         println!("\r\n[session ended]");
         result
     }

@@ -1,4 +1,4 @@
-use std::pin::Pin;
+use std::{fmt, pin::Pin};
 
 use anyhow::Result;
 use futures::{Sink, SinkExt, Stream, StreamExt};
@@ -28,6 +28,12 @@ impl Sender {
     }
 }
 
+impl fmt::Debug for Sender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sender").finish_non_exhaustive()
+    }
+}
+
 impl Receiver {
     pub async fn recv(&mut self) -> Result<Msg> {
         match self.0.next().await {
@@ -35,5 +41,11 @@ impl Receiver {
             Some(Err(e)) => Err(e.into()),
             None => anyhow::bail!("transit connection closed"),
         }
+    }
+}
+
+impl fmt::Debug for Receiver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Receiver").finish_non_exhaustive()
     }
 }

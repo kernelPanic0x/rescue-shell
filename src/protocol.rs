@@ -4,7 +4,7 @@ use wincode::{SchemaRead, SchemaWrite};
 
 /// Every message on the wire. The wormhole channel is already
 /// message-framed (send/receive Vec<u8>), so we just bincode-encode.
-#[derive(SchemaWrite, SchemaRead, Debug)]
+#[derive(SchemaWrite, SchemaRead, Debug, Clone)]
 pub enum Msg {
     /// Terminal bytes. Direction depends on context:
     /// helper→victim: keystrokes for the PTY.
