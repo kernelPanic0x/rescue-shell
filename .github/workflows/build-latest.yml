@@ -15,36 +15,55 @@ env:
 jobs:
   build:
     name: Build for ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
-          - arm-unknown-linux-musleabihf
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-          - x86_64-unknown-freebsd
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_zigbuild: true
+          - target: arm-unknown-linux-musleabihf
+            os: ubuntu-latest
+            use_zigbuild: true
+          - target: x86_64-unknown-freebsd
+            os: ubuntu-latest
+            use_zigbuild: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            use_zigbuild: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use_zigbuild: false
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v4
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Install cargo-zigbuild and Zig
+      - name: Install cargo-zigbuild
+        if: matrix.use_zigbuild
         run: pip install cargo-zigbuild
 
-      - name: Build with cargo-zigbuild
-        run: cargo zigbuild --release --target ${{ matrix.target }}
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
 
       - name: Prepare artifact
         run: |
           cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} ./${{ env.BINARY_NAME }}-${{ matrix.target }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.target }}
           path: ./${{ env.BINARY_NAME }}-${{ matrix.target }}
@@ -55,10 +74,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v4
         with:
           pattern: binary-*
           merge-multiple: true
