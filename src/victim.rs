@@ -1,4 +1,4 @@
-use crate::common::{ConnectionStateWatcher, TermGuard};
+use crate::common::{ALPN, ConnectionStateWatcher, TermGuard};
 use crate::protocol::{decode, encode};
 use crate::screen::{Role, StatusBarHandle, StatusBarState, render_local_screen};
 use crate::{common::is_detach_key, protocol::Msg};
@@ -125,7 +125,9 @@ impl ProtocolHandler for Protocol {
 
 #[derive(Debug, Clone)]
 struct Link {
+    #[allow(dead_code)]
     secret_key: SecretKey,
+    #[allow(dead_code)]
     router: Router,
 }
 
@@ -144,7 +146,7 @@ impl Link {
             .await?;
 
         let router = Router::builder(endpoint.clone())
-            .accept(b"rescue-shell", protocol)
+            .accept(ALPN, protocol)
             .spawn();
 
         let connection_watcher = ConnectionStateWatcher::new(endpoint, statusbar_handle.clone());
@@ -172,6 +174,7 @@ impl Link {
 
 #[derive(Debug)]
 pub struct Victim {
+    #[allow(dead_code)]
     code: Code,
 }
 
@@ -180,7 +183,7 @@ impl Victim {
         enable_raw_mode()?;
         let _guard = TermGuard;
 
-        let (mut cols, mut rows) = size().unwrap_or((80, 24));
+        let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
         let mut vt_parser = vt100::Parser::new(pty_rows, cols, 1000);
         let (statusbar_handle, mut statusbar_rx) = StatusBarHandle::new(Role::Victim);
@@ -278,7 +281,7 @@ impl Victim {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
 
         // ── 4. Main Event Multiplexer Loop ────────────────────────
-        let result = loop {
+        let res: anyhow::Result<()> = loop {
             #[cfg(unix)]
             let sigwinch_recv = sigwinch.recv();
             #[cfg(not(unix))]
@@ -306,7 +309,7 @@ impl Victim {
                     if is_detach_key(&bytes) {
                         break Ok(());
                     }
-                    to_pty_tx.send(bytes).await?;
+                    let _ = to_pty_tx.send(bytes).await?;
                 }
 
                 // Remote messages from Helper -> Send to PTY / Resize
@@ -314,7 +317,7 @@ impl Victim {
                     match incoming {
                         Some(msg) => match msg {
                             Msg::Data(bytes) => {
-                                to_pty_tx.send(bytes).await?;
+                                let _ = to_pty_tx.send(bytes).await?;
                             }
                             Msg::Resize { cols, rows } => {
                                 master.resize(PtySize {
@@ -323,7 +326,7 @@ impl Victim {
                             }
                             Msg::Bye => {},
                         },
-                        None => unreachable!("broadcast channel can't be invalid"),
+                        None => {}, // Gracefully ignore channel closure
                     }
                 }
 
@@ -359,6 +362,8 @@ impl Victim {
             }
         };
 
+        let _ = res?;
+
         let _ = to_helpers.send(Msg::Bye);
 
         // Drop sender and wait for the stdout thread to finish writing remaining frames
@@ -376,7 +381,8 @@ impl Victim {
         );
 
         println!("\r\n[session ended]");
-        result
+
+        Ok(())
     }
 }
 

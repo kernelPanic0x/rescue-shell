@@ -53,12 +53,15 @@ impl StatusBarState {
     pub fn render_to(&self, buf: &mut Vec<u8>, cols: u16) {
         let code = match &self.code {
             Some(code) => code.to_string(),
-            None => "No code yet".to_string(),
+            None => "No code".to_string(),
         };
 
         let title = format!("rescue-shell {}", env!("CARGO_PKG_VERSION"));
         let role = self.role.to_string();
-        let connected_helpers = format!("Connected: {}", self.connected_helpers);
+        let connected_helpers = match self.role {
+            Role::Victim => format!("Connected: {}", self.connected_helpers),
+            Role::Helper => format!("Connected"),
+        };
         let internet_state = format!("{}", self.internet_state);
         let raw_text = format!(
             "{} | {} | {} | {} | {}",
@@ -123,12 +126,15 @@ pub fn render_local_screen(
     total_rows: u16,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
+    let screen = parser.screen();
 
-    // 1. Draw status bar on physical Row 0
+    // 1. Sync physical terminal input modes (DECCKM for arrow keys, mouse, etc.)
+    buf.extend_from_slice(&screen.input_mode_formatted());
+
+    // 2. Draw status bar on physical Row 0
     status_bar.render_to(&mut buf, cols);
 
-    // 2. Draw VT100 rows starting on physical Row 1
-    let screen = parser.screen();
+    // 3. Draw VT100 rows starting on physical Row 1
     for (r, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
         let physical_row = (r as u16) + 1;
         if physical_row >= total_rows {
@@ -145,7 +151,7 @@ pub fn render_local_screen(
         buf.extend_from_slice(&row_bytes);
     }
 
-    // 3. Move terminal cursor to virtual cursor position
+    // 4. Move terminal cursor to virtual cursor position
     let (cur_r, cur_c) = screen.cursor_position();
     let _ = queue!(
         buf,

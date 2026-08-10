@@ -100,16 +100,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Connect { common } => {
             let config = app_config(&common);
-            let relay_hints = parse_relay_hints(&common.relay_server)?;
-            let abilities = parse_transit_args(&common);
-
             let code = Code::from_str(&completer::enter_code()?)?;
-            let mailbox = MailboxConnection::connect(config, code, true).await?;
-            let mut wormhole = Wormhole::connect(mailbox).await?;
-            let transit =
-                establish_transit(&mut wormhole, relay_hints, abilities, TransitRole::Follower)
-                    .await?;
-            Helper::run(transit).await
+            Helper::run(config, code).await
         }
         Cmd::Copy => copy_to_osc52(),
     }

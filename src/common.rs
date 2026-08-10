@@ -15,6 +15,8 @@ use tokio::time::sleep;
 
 use crate::{protocol::Handshake, screen::StatusBarHandle};
 
+pub const ALPN: &[u8; 12] = b"rescue-shell";
+
 /// Restore Victim host terminal mode on exit.
 pub struct TermGuard;
 impl Drop for TermGuard {
