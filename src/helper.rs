@@ -178,7 +178,7 @@ impl Helper {
                 _ = statusbar_rx.changed() => {
                     let state = statusbar_rx.borrow();
                     let frame = render_local_screen(&vt_parser, &state, cols, rows);
-                    let _ = stdout_tx.send(frame).await;
+                    stdout_tx.send(frame).await?;
                 }
 
                 // Raw stdin bytes -> filter -> send to victim
@@ -206,11 +206,11 @@ impl Helper {
                         vt_parser.screen_mut().set_size(pty_rows, cols);
 
                         // Notify victim shell of new dimensions
-                        let _ = to_victim_tx.send(Msg::Resize { cols: new_cols, rows: pty_rows }).await;
+                        to_victim_tx.send(Msg::Resize { cols: new_cols, rows: pty_rows }).await?;
 
                         let state = statusbar_rx.borrow();
                         let frame = render_local_screen(&vt_parser, &state, cols, rows);
-                        let _ = stdout_tx.send(frame).await;
+                        stdout_tx.send(frame).await?;
                     }
                 }
 
@@ -222,7 +222,7 @@ impl Helper {
                                 vt_parser.process(&bytes);
                                 let state = statusbar_rx.borrow();
                                 let frame = render_local_screen(&vt_parser, &state, cols, rows);
-                                let _ = stdout_tx.send(frame).await;
+                                stdout_tx.send(frame).await?;
                             }
                             Msg::Bye => break Ok(()),
                             _ => {}
@@ -233,7 +233,8 @@ impl Helper {
             }
         };
 
-        let _ = to_victim_tx.send(Msg::Bye);
+        let _ = result?;
+        to_victim_tx.send(Msg::Bye).await?;
 
         // Drop sender and wait for stdout thread to flush remaining screen writes
         drop(stdout_tx);
@@ -250,6 +251,6 @@ impl Helper {
         );
 
         println!("\r\n[session ended]");
-        result
+        Ok(())
     }
 }
