@@ -5,7 +5,7 @@ mod connection;
 mod helper;
 mod link;
 mod osc52;
-mod osc_filter;
+mod osc_extractor;
 mod protocol;
 mod screen;
 mod victim;
@@ -19,7 +19,7 @@ use magic_wormhole::{
     transit::{self, RelayHint, TransitRole},
 };
 
-use crate::{common::establish_transit, helper::Helper, osc52::copy_to_osc52, victim::Victim};
+use crate::{helper::Helper, osc52::copy_to_osc52, victim::Victim};
 
 #[derive(Parser)]
 #[command(about = "Remote rescue shell over magic-wormhole")]

@@ -1,6 +1,6 @@
 use crate::{
     common::{ALPN, ConnectionStateWatcher, TermGuard, is_detach_key},
-    osc_filter::OscFilter,
+    osc_extractor::Osc52Extractor,
     protocol::{Msg, decode, encode},
     screen::{Role, StatusBarHandle, render_local_screen},
 };
@@ -17,6 +17,7 @@ use iroh::{Endpoint, PublicKey, SecretKey, endpoint::presets};
 use magic_wormhole::{AppConfig, Code, MailboxConnection, Wormhole, transfer::AppVersion};
 use std::{
     io::{Read, Write},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{sync::mpsc, time::timeout};
@@ -109,11 +110,11 @@ impl Helper {
 
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
-        let mut vt_parser = vt100::Parser::new(pty_rows, cols, 1000);
+        let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(pty_rows, cols, 1000)));
         let (statusbar_handle, mut statusbar_rx) = StatusBarHandle::new(Role::Helper);
 
-        let (to_victim_tx, to_victim_rx) = mpsc::channel::<Msg>(100);
-        let (from_victim_tx, mut from_victim_rx) = mpsc::channel::<Msg>(100);
+        let (to_victim_tx, to_victim_rx) = mpsc::channel::<Msg>(1000);
+        let (from_victim_tx, mut from_victim_rx) = mpsc::channel::<Msg>(1000);
         let _link = Link::new(
             app_config,
             code,
@@ -164,7 +165,7 @@ impl Helper {
             }
         });
 
-        let mut filter = OscFilter::default();
+        let mut osc_extractor = Osc52Extractor::default();
 
         // ── 3. Main Event Loop ─────────────────────────────────────
         let result = loop {
@@ -177,14 +178,12 @@ impl Helper {
                 // Status bar update -> render frame locally
                 _ = statusbar_rx.changed() => {
                     let state = statusbar_rx.borrow();
-                    let frame = render_local_screen(&vt_parser, &state, cols, rows);
+                    let frame = render_local_screen(vt_parser.clone(), &state, cols, rows);
                     stdout_tx.send(frame).await?;
                 }
 
                 // Raw stdin bytes -> filter -> send to victim
-                Some(raw_bytes) = stdin_rx.recv() => {
-                    let bytes = filter.filter(&raw_bytes);
-
+                Some(bytes) = stdin_rx.recv() => {
                     if bytes.is_empty() {
                         continue;
                     }
@@ -203,13 +202,13 @@ impl Helper {
                         rows = new_rows;
                         pty_rows = rows.saturating_sub(1).max(1);
 
-                        vt_parser.screen_mut().set_size(pty_rows, cols);
+                        vt_parser.lock().unwrap().screen_mut().set_size(pty_rows, cols);
 
                         // Notify victim shell of new dimensions
                         to_victim_tx.send(Msg::Resize { cols: new_cols, rows: pty_rows }).await?;
 
                         let state = statusbar_rx.borrow();
-                        let frame = render_local_screen(&vt_parser, &state, cols, rows);
+                        let frame = render_local_screen(vt_parser.clone(), &state, cols, rows);
                         stdout_tx.send(frame).await?;
                     }
                 }
@@ -219,9 +218,15 @@ impl Helper {
                     match incoming {
                         Some(raw) => match raw {
                             Msg::Data(bytes) => {
-                                vt_parser.process(&bytes);
+                                // Isolate OSC 52 sequences and send directly to local terminal (Alacritty)
+                                let osc52_bytes = osc_extractor.extract(&bytes);
+                                if !osc52_bytes.is_empty() {
+                                    stdout_tx.send(osc52_bytes).await?;
+                                }
+
+                                vt_parser.lock().unwrap().process(&bytes);
                                 let state = statusbar_rx.borrow();
-                                let frame = render_local_screen(&vt_parser, &state, cols, rows);
+                                let frame = render_local_screen(vt_parser.clone(), &state, cols, rows);
                                 stdout_tx.send(frame).await?;
                             }
                             Msg::Bye => break Ok(()),

@@ -19,7 +19,7 @@ use iroh::{
     endpoint::{Connection, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
-use libc::clearerr;
+use libc::{IW_AUTH_WPA_VERSION_WPA2, clearerr};
 use magic_wormhole::{AppConfig, Code, MailboxConnection, Wormhole, transfer::AppVersion};
 use n0_error::AnyError;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -27,6 +27,7 @@ use std::borrow::Borrow;
 use std::io::{Read, Write};
 use std::ops::Deref;
 use std::pin::pin;
+use std::sync::{Arc, Mutex};
 use tokio::select;
 use tokio::sync::{broadcast, mpsc};
 use tokio_serde::{SymmetricallyFramed, formats::SymmetricalBincode};
@@ -49,11 +50,11 @@ impl Drop for SBClientsGuard {
     }
 }
 
-#[derive(Debug)]
 struct Protocol {
     from_helper: mpsc::Sender<Msg>,
     to_helpers: broadcast::Sender<Msg>,
     statusbar_handle: StatusBarHandle,
+    vt_parser: Arc<Mutex<vt100::Parser>>,
 }
 
 impl Protocol {
@@ -61,18 +62,31 @@ impl Protocol {
         to_helpers: broadcast::Sender<Msg>,
         from_helper: mpsc::Sender<Msg>,
         statusbar_handle: StatusBarHandle,
+        vt_parser: Arc<Mutex<vt100::Parser>>,
     ) -> Self {
         Self {
             from_helper,
             to_helpers,
             statusbar_handle,
+            vt_parser,
         }
+    }
+}
+
+impl std::fmt::Debug for Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Protocol")
+            .field("from_helper", &self.from_helper)
+            .field("to_helpers", &self.to_helpers)
+            .field("statusbar_handle", &self.statusbar_handle)
+            .field("vt_parser", &"<vt100::Parser>") // Placeholder string for Debug output
+            .finish()
     }
 }
 
 impl ProtocolHandler for Protocol {
     async fn accept(&self, c: Connection) -> Result<(), AcceptError> {
-        if c.alpn() != b"rescue-shell" {
+        if c.alpn() != ALPN {
             return Err(AcceptError::NotAllowed {
                 meta: n0_error::Meta::default(),
             });
@@ -87,6 +101,16 @@ impl ProtocolHandler for Protocol {
         let (tx, rx) = c.accept_bi().await?;
         let mut raw_writer = tokio_util::codec::FramedWrite::new(tx, LengthDelimitedCodec::new());
         let mut raw_reader = tokio_util::codec::FramedRead::new(rx, LengthDelimitedCodec::new());
+
+        // Send full screen buffer first
+        let initial_state = {
+            let parser = self.vt_parser.lock().unwrap();
+            parser.screen().state_formatted() // Generates full ANSI redraw payload
+        };
+
+        if let Ok(encoded) = encode(&Msg::Data(initial_state)) {
+            let _ = raw_writer.send(Bytes::from(encoded)).await;
+        }
 
         // Helper -> Victim
         let helper_victim = tokio::spawn(async move {
@@ -185,14 +209,21 @@ impl Victim {
 
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
-        let mut vt_parser = vt100::Parser::new(pty_rows, cols, 1000);
+        let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(pty_rows, cols, 1000)));
         let (statusbar_handle, mut statusbar_rx) = StatusBarHandle::new(Role::Victim);
 
         // Link channels
-        let to_helpers = broadcast::Sender::<Msg>::new(100);
-        let (from_helper_tx, mut from_helper_rx) = mpsc::channel::<Msg>(100);
-        let protocol = Protocol::new(to_helpers.clone(), from_helper_tx, statusbar_handle.clone());
-        let _link = Link::new(app_config, protocol, statusbar_handle).await?;
+        let to_helpers = broadcast::Sender::<Msg>::new(1000);
+        let (from_helper_tx, mut from_helper_rx) = mpsc::channel::<Msg>(1000);
+        let protocol = Protocol::new(
+            to_helpers.clone(),
+            from_helper_tx,
+            statusbar_handle.clone(),
+            vt_parser.clone(),
+        );
+        let _link = Link::new(app_config, protocol, statusbar_handle)
+            .await
+            .context("Link creation")?;
 
         // Pty
         let pty_system = native_pty_system();
@@ -291,16 +322,18 @@ impl Victim {
                 // statusbar update
                 _ = statusbar_rx.changed() => {
                     let state = statusbar_rx.borrow();
-                    let frame = render_local_screen(&vt_parser, &state, cols, rows);
-                    let _ = stdout_tx.send(frame).await?;
+                    let frame = render_local_screen(vt_parser.clone(), &state, cols, rows);
+                    stdout_tx.send(frame).await?;
                 }
 
                 // Shell output -> Mirror locally AND send to Helpers
                 Some(bytes) = pty_out_rx.recv() => {
-                    vt_parser.process(&bytes);
+                    vt_parser.lock().unwrap().process(&bytes);
                     let state = statusbar_rx.borrow();
-                    let frame = render_local_screen(&vt_parser, &state, cols, rows);
-                    let _ = stdout_tx.send(frame).await?;
+                    let frame = render_local_screen(vt_parser.clone(), &state, cols, rows);
+                    stdout_tx.send(frame).await?;
+
+                    // Returns Err when no helpers connected
                     let _ = to_helpers.send(Msg::Data(bytes));
                 }
 
@@ -309,7 +342,7 @@ impl Victim {
                     if is_detach_key(&bytes) {
                         break Ok(());
                     }
-                    let _ = to_pty_tx.send(bytes).await?;
+                    to_pty_tx.send(bytes).await?;
                 }
 
                 // Remote messages from Helper -> Send to PTY / Resize
@@ -317,7 +350,7 @@ impl Victim {
                     match incoming {
                         Some(msg) => match msg {
                             Msg::Data(bytes) => {
-                                let _ = to_pty_tx.send(bytes).await?;
+                                to_pty_tx.send(bytes).await?;
                             }
                             Msg::Resize { cols, rows } => {
                                 master.resize(PtySize {
@@ -341,12 +374,12 @@ impl Victim {
                             rows: pty_rows, cols, pixel_width: 0, pixel_height: 0,
                         });
 
-                        vt_parser.screen_mut().set_size(pty_rows, cols);
+                        vt_parser.lock().unwrap().screen_mut().set_size(pty_rows, cols);
                         let state = statusbar_rx.borrow();
 
                         // Redraw screen on resize
-                        let frame = render_local_screen(&vt_parser, &state, cols, rows);
-                        let _ = stdout_tx.send(frame).await?;
+                        let frame = render_local_screen(vt_parser.clone(), &state, cols, rows);
+                        stdout_tx.send(frame).await?;
                     }
                 }
 

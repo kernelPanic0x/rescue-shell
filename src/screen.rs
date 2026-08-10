@@ -1,4 +1,8 @@
-use std::{fmt, time::Duration};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use crossterm::{
     cursor::MoveTo,
@@ -116,11 +120,12 @@ impl StatusBarHandle {
 }
 
 pub fn render_local_screen(
-    parser: &vt100::Parser,
+    parser: Arc<Mutex<vt100::Parser>>,
     status_bar: &StatusBarState,
     cols: u16,
     total_rows: u16,
 ) -> Vec<u8> {
+    let parser = parser.lock().unwrap();
     let mut buf = Vec::new();
     let screen = parser.screen();
 
