@@ -58,14 +58,10 @@ impl StatusBarState {
 
         let title = format!("rescue-shell {}", env!("CARGO_PKG_VERSION"));
         let role = self.role.to_string();
-        let connected_helpers = match self.role {
-            Role::Victim => format!("Connected: {}", self.connected_helpers),
-            Role::Helper => format!("Connected"),
-        };
+        let connected_helpers = format!("Connected: {}", self.connected_helpers);
         let internet_state = format!("{}", self.internet_state);
         let raw_text = format!(
-            "{} | {} | {} | {} | {}",
-            code, title, role, connected_helpers, internet_state
+            "{code} | {title} | {role} | {connected_helpers} | {internet_state} | CTRL+] to exit",
         );
 
         let width = cols as usize;
