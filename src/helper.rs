@@ -4,14 +4,9 @@ use crate::{
     protocol::{Msg, decode, encode},
     screen::{Role, StatusBarHandle, render_local_screen},
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
-use crossterm::{
-    cursor::{MoveTo, Show},
-    execute,
-    style::{Attribute, SetAttribute},
-    terminal::{Clear, ClearType, enable_raw_mode, size},
-};
+use crossterm::terminal::{enable_raw_mode, size};
 use futures::{SinkExt, StreamExt};
 use iroh::{Endpoint, PublicKey, SecretKey, endpoint::presets};
 use magic_wormhole::{AppConfig, Code, MailboxConnection, Wormhole, transfer::AppVersion};
@@ -80,7 +75,11 @@ impl Link {
         // Helper -> Victim
         let helper_victim = tokio::spawn(async move {
             loop {
-                let msg = to_victim_rx.recv().await.ok_or(anyhow!("channel closed"))?;
+                let msg = to_victim_rx
+                    .recv()
+                    .await
+                    .ok_or(anyhow!("channel closed"))
+                    .context("Helper to victim")?;
                 raw_writer.send(Bytes::from(encode(&msg)?)).await?;
             }
 
@@ -232,30 +231,19 @@ impl Helper {
                             Msg::Bye => break Ok(()),
                             _ => {}
                         },
-                        None => break Err(anyhow!("channel closed")),
+                        None => break Err(anyhow!("channel closed")).context("Recv from victim"),
                     }
                 }
             }
         };
 
-        let _ = result?;
+        result?;
         to_victim_tx.send(Msg::Bye).await?;
 
         // Drop sender and wait for stdout thread to flush remaining screen writes
         drop(stdout_tx);
         let _ = stdout_handle.await;
 
-        // Reset terminal attributes, clear screen, and show cursor
-        let mut stdout = std::io::stdout();
-        let _ = execute!(
-            stdout,
-            SetAttribute(Attribute::Reset),
-            Clear(ClearType::All),
-            MoveTo(0, 0),
-            Show
-        );
-
-        println!("\r\n[session ended]");
         Ok(())
     }
 }

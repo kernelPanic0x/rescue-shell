@@ -1,37 +1,24 @@
 use crate::common::{ALPN, ConnectionStateWatcher, TermGuard};
 use crate::protocol::{decode, encode};
-use crate::screen::{Role, StatusBarHandle, StatusBarState, render_local_screen};
+use crate::screen::{Role, StatusBarHandle, render_local_screen};
 use crate::{common::is_detach_key, protocol::Msg};
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use crossterm::cursor::{MoveTo, Show};
-use crossterm::execute;
-use crossterm::style::{Attribute, SetAttribute};
-use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
+use crossterm::terminal::{enable_raw_mode, size};
 use futures::SinkExt;
 use futures::StreamExt;
-use futures::future::{join, select_all};
-use iroh::Watcher;
-use iroh::endpoint::RelayStatus;
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{Connection, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
-use libc::{IW_AUTH_WPA_VERSION_WPA2, clearerr};
 use magic_wormhole::{AppConfig, Code, MailboxConnection, Wormhole, transfer::AppVersion};
-use n0_error::AnyError;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
-use std::borrow::Borrow;
 use std::io::{Read, Write};
-use std::ops::Deref;
-use std::pin::pin;
 use std::sync::{Arc, Mutex};
-use tokio::select;
 use tokio::sync::{broadcast, mpsc};
-use tokio_serde::{SymmetricallyFramed, formats::SymmetricalBincode};
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tokio_util::codec::LengthDelimitedCodec;
 
 struct SBClientsGuard {
     statusbar_handle: StatusBarHandle,
@@ -347,8 +334,8 @@ impl Victim {
 
                 // Remote messages from Helper -> Send to PTY / Resize
                 incoming = from_helper_rx.recv() => {
-                    match incoming {
-                        Some(msg) => match msg {
+                    if let Some(msg) = incoming {
+                        match msg {
                             Msg::Data(bytes) => {
                                 to_pty_tx.send(bytes).await?;
                             }
@@ -358,8 +345,7 @@ impl Victim {
                                 })?;
                             }
                             Msg::Bye => {},
-                        },
-                        None => {}, // Gracefully ignore channel closure
+                        }
                     }
                 }
 
@@ -395,25 +381,13 @@ impl Victim {
             }
         };
 
-        let _ = res?;
+        res?;
 
         let _ = to_helpers.send(Msg::Bye);
 
         // Drop sender and wait for the stdout thread to finish writing remaining frames
         drop(stdout_tx);
         let _ = stdout_handle.await;
-
-        // Reset terminal attributes, clear the screen, move cursor to (0,0) and show it
-        let mut stdout = std::io::stdout();
-        let _ = execute!(
-            stdout,
-            SetAttribute(Attribute::Reset),
-            Clear(ClearType::All),
-            MoveTo(0, 0),
-            Show
-        );
-
-        println!("\r\n[session ended]");
 
         Ok(())
     }

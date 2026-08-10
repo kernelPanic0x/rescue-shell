@@ -11,7 +11,7 @@ use crossterm::{
     terminal::Clear,
 };
 use magic_wormhole::Code;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 #[derive(Clone, Debug)]
 pub enum InternetState {

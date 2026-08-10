@@ -1,16 +1,12 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use crossterm::{
-    cursor::Show,
+    cursor::{MoveTo, Show},
     execute,
     style::{Attribute, SetAttribute},
-    terminal::disable_raw_mode,
+    terminal::{Clear, ClearType, LeaveAlternateScreen, disable_raw_mode},
 };
-use iroh::{Endpoint, Watcher, endpoint::RelayStatus};
-use magic_wormhole::{
-    Key, Wormhole,
-    transit::{self, TransitKey, TransitRole},
-};
+use iroh::{Endpoint, Watcher};
 use tokio::time::sleep;
 
 use crate::screen::StatusBarHandle;
@@ -22,8 +18,19 @@ pub struct TermGuard;
 impl Drop for TermGuard {
     fn drop(&mut self) {
         let mut stdout = std::io::stdout();
-        let _ = execute!(stdout, SetAttribute(Attribute::Reset), Show);
+
+        let _ = execute!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            LeaveAlternateScreen,
+            Clear(ClearType::All),
+            MoveTo(0, 0),
+            Show
+        );
+
         let _ = disable_raw_mode();
+
+        println!("\r\n[session ended]");
     }
 }
 

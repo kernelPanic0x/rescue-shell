@@ -1,9 +1,7 @@
 // src/main.rs
 mod common;
 mod completer;
-mod connection;
 mod helper;
-mod link;
 mod osc52;
 mod osc_extractor;
 mod protocol;
@@ -13,11 +11,7 @@ mod victim;
 use std::{borrow::Cow, str::FromStr};
 
 use clap::{Args, Parser, Subcommand};
-use magic_wormhole::{
-    AppID, Code, MailboxConnection, Wormhole,
-    transfer::APP_CONFIG,
-    transit::{self, RelayHint, TransitRole},
-};
+use magic_wormhole::{AppID, Code, transfer::APP_CONFIG};
 
 use crate::{helper::Helper, osc52::copy_to_osc52, victim::Victim};
 
@@ -65,28 +59,6 @@ struct CommonArgs {
     /// Always route traffic over a relay server. This hides your IP address from the peer (but not from the server operators. Use Tor for that).
     #[arg(long, conflicts_with = "force_direct")]
     force_relay: bool,
-}
-
-fn parse_transit_args(args: &CommonArgs) -> transit::Abilities {
-    match (args.force_direct, args.force_relay) {
-        (false, false) => transit::Abilities::ALL,
-        (true, false) => transit::Abilities::FORCE_DIRECT,
-        (false, true) => transit::Abilities::FORCE_RELAY,
-        (true, true) => unreachable!("These flags are mutually exclusive"),
-    }
-}
-
-fn parse_relay_hints(relay_servers: &[url::Url]) -> anyhow::Result<Vec<RelayHint>> {
-    relay_servers
-        .iter()
-        .map(|url| {
-            RelayHint::from_urls(
-                url.host_str().map(str::to_owned), // human-readable name
-                std::iter::once(url.clone()),
-            )
-            .map_err(Into::into)
-        })
-        .collect()
 }
 
 #[tokio::main]
