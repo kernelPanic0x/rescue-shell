@@ -1,17 +1,19 @@
-use crate::{common::is_detach_key, link, osc_filter::OscFilter, protocol::Msg};
+use crate::{
+    common::{TermGuard, is_detach_key},
+    link,
+    osc_filter::OscFilter,
+    protocol::Msg,
+};
 use anyhow::Result;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
+use crossterm::{
+    cursor::{MoveTo, Show},
+    execute,
+    style::{Attribute, SetAttribute},
+    terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size},
+};
 use magic_wormhole::transit::Transit;
 use std::io::{Read, Write};
 use tokio::sync::mpsc;
-
-/// Restore the terminal no matter how we exit.
-struct RawGuard;
-impl Drop for RawGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-    }
-}
 
 #[derive(Default)]
 pub struct Helper;
@@ -21,7 +23,7 @@ impl Helper {
         let (mut tx, mut rx) = link::channel(transit);
 
         enable_raw_mode()?;
-        let _guard = RawGuard;
+        let _guard = TermGuard;
 
         let (cols, rows) = size()?;
         tx.send(&Msg::Resize { cols, rows }).await?;
@@ -50,7 +52,7 @@ impl Helper {
 
         // ── 2. Stdout Writer Thread ────────────────────────────────
         let (stdout_tx, mut stdout_rx) = mpsc::channel::<Vec<u8>>(64);
-        tokio::task::spawn_blocking(move || {
+        let stdout_handle = tokio::task::spawn_blocking(move || {
             let mut stdout = std::io::stdout();
             while let Some(bytes) = stdout_rx.blocking_recv() {
                 if stdout.write_all(&bytes).is_err() || stdout.flush().is_err() {
@@ -107,7 +109,23 @@ impl Helper {
             }
         };
 
-        let _ = tx.send(&Msg::Bye).await;
+        todo!();
+        // let _ = to_helpers.send(Msg::Bye);
+
+        // Drop sender and wait for the stdout thread to finish writing remaining frames
+        drop(stdout_tx);
+        let _ = stdout_handle.await;
+
+        // Reset terminal attributes, clear the screen, move cursor to (0,0) and show it
+        let mut stdout = std::io::stdout();
+        let _ = execute!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            Clear(ClearType::All),
+            MoveTo(0, 0),
+            Show
+        );
+
         println!("\r\n[session ended]");
         result
     }

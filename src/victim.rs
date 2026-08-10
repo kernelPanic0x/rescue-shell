@@ -1,32 +1,51 @@
+use crate::common::{ConnectionStateWatcher, TermGuard};
 use crate::protocol::{decode, encode};
 use crate::screen::{Role, StatusBarHandle, StatusBarState, render_local_screen};
 use crate::{common::is_detach_key, protocol::Msg};
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
+use crossterm::cursor::{MoveTo, Show};
+use crossterm::execute;
+use crossterm::style::{Attribute, SetAttribute};
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
 use futures::SinkExt;
 use futures::StreamExt;
 use futures::future::{join, select_all};
+use iroh::Watcher;
+use iroh::endpoint::RelayStatus;
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{Connection, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
+use libc::clearerr;
 use magic_wormhole::{AppConfig, Code, MailboxConnection, Wormhole, transfer::AppVersion};
 use n0_error::AnyError;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::borrow::Borrow;
 use std::io::{Read, Write};
+use std::ops::Deref;
+use std::pin::pin;
+use tokio::select;
 use tokio::sync::{broadcast, mpsc};
 use tokio_serde::{SymmetricallyFramed, formats::SymmetricalBincode};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-/// Restore Victim host terminal mode on exit.
-struct RawGuard;
-impl Drop for RawGuard {
+struct SBClientsGuard {
+    statusbar_handle: StatusBarHandle,
+}
+
+impl SBClientsGuard {
+    fn new(statusbar_handle: StatusBarHandle) -> Self {
+        statusbar_handle.helper_connected();
+        Self { statusbar_handle }
+    }
+}
+
+impl Drop for SBClientsGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
+        self.statusbar_handle.helper_disconnected();
     }
 }
 
@@ -34,13 +53,19 @@ impl Drop for RawGuard {
 struct Protocol {
     from_helper: mpsc::Sender<Msg>,
     to_helpers: broadcast::Sender<Msg>,
+    statusbar_handle: StatusBarHandle,
 }
 
 impl Protocol {
-    fn new(to_helpers: broadcast::Sender<Msg>, from_helper: mpsc::Sender<Msg>) -> Self {
+    fn new(
+        to_helpers: broadcast::Sender<Msg>,
+        from_helper: mpsc::Sender<Msg>,
+        statusbar_handle: StatusBarHandle,
+    ) -> Self {
         Self {
             from_helper,
             to_helpers,
+            statusbar_handle,
         }
     }
 }
@@ -52,6 +77,9 @@ impl ProtocolHandler for Protocol {
                 meta: n0_error::Meta::default(),
             });
         }
+
+        // Handle inc and dec on drop
+        let _sb_clients_guard = SBClientsGuard::new(self.statusbar_handle.clone());
 
         let mut to_helpers = self.to_helpers.subscribe();
         let from_helper = self.from_helper.clone();
@@ -110,14 +138,17 @@ impl Link {
         let secret_key = SecretKey::generate();
         let public_key = secret_key.public();
 
-        let ep = Endpoint::builder(presets::N0)
+        let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret_key.clone())
             .bind()
             .await?;
 
-        let router = Router::builder(ep)
+        let router = Router::builder(endpoint.clone())
             .accept(b"rescue-shell", protocol)
             .spawn();
+
+        let connection_watcher = ConnectionStateWatcher::new(endpoint, statusbar_handle.clone());
+        tokio::task::spawn(async move { connection_watcher.watch().await });
 
         tokio::task::spawn(async move {
             loop {
@@ -147,7 +178,7 @@ pub struct Victim {
 impl Victim {
     pub async fn run(app_config: AppConfig<AppVersion>) -> Result<()> {
         enable_raw_mode()?;
-        let _guard = RawGuard;
+        let _guard = TermGuard;
 
         let (mut cols, mut rows) = size().unwrap_or((80, 24));
         let mut pty_rows = rows.saturating_sub(1).max(1);
@@ -157,13 +188,13 @@ impl Victim {
         // Link channels
         let to_helpers = broadcast::Sender::<Msg>::new(100);
         let (from_helper_tx, mut from_helper_rx) = mpsc::channel::<Msg>(100);
-        let protocol = Protocol::new(to_helpers.clone(), from_helper_tx);
+        let protocol = Protocol::new(to_helpers.clone(), from_helper_tx, statusbar_handle.clone());
         let _link = Link::new(app_config, protocol, statusbar_handle).await?;
 
-        // ── 2. Initialize PTY ──────────────────────────────────────
+        // Pty
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
-            rows,
+            rows: pty_rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
@@ -231,7 +262,7 @@ impl Victim {
 
         // Local Stdout Writer Thread
         let (stdout_tx, mut stdout_rx) = mpsc::channel::<Vec<u8>>(64);
-        tokio::task::spawn_blocking(move || {
+        let stdout_handle = tokio::task::spawn_blocking(move || {
             let mut stdout = std::io::stdout();
             while let Some(bytes) = stdout_rx.blocking_recv() {
                 if stdout.write_all(&bytes).is_err() || stdout.flush().is_err() {
@@ -329,6 +360,21 @@ impl Victim {
         };
 
         let _ = to_helpers.send(Msg::Bye);
+
+        // Drop sender and wait for the stdout thread to finish writing remaining frames
+        drop(stdout_tx);
+        let _ = stdout_handle.await;
+
+        // Reset terminal attributes, clear the screen, move cursor to (0,0) and show it
+        let mut stdout = std::io::stdout();
+        let _ = execute!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            Clear(ClearType::All),
+            MoveTo(0, 0),
+            Show
+        );
+
         println!("\r\n[session ended]");
         result
     }

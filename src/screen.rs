@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use crossterm::{
     cursor::MoveTo,
@@ -10,29 +10,44 @@ use magic_wormhole::Code;
 use tokio::sync::{mpsc, watch};
 
 #[derive(Clone, Debug)]
+pub enum InternetState {
+    Online(Duration),
+    Offline,
+}
+
+impl fmt::Display for InternetState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InternetState::Online(duration) => {
+                write!(f, "Online ({} ms)", duration.as_millis())
+            }
+            InternetState::Offline => write!(f, "Offline"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, strum::Display)]
 pub enum Role {
     Victim,
     Helper,
-}
-
-impl fmt::Display for Role {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Role::Victim => write!(f, "Victim"),
-            Role::Helper => write!(f, "Helper"),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
 pub struct StatusBarState {
     code: Option<Code>,
     role: Role,
+    connected_helpers: u8,
+    internet_state: InternetState,
 }
 
 impl StatusBarState {
     fn new(role: Role) -> Self {
-        Self { code: None, role }
+        Self {
+            code: None,
+            role,
+            connected_helpers: 0,
+            internet_state: InternetState::Offline,
+        }
     }
 
     pub fn render_to(&self, buf: &mut Vec<u8>, cols: u16) {
@@ -43,7 +58,12 @@ impl StatusBarState {
 
         let title = format!("rescue-shell {}", env!("CARGO_PKG_VERSION"));
         let role = self.role.to_string();
-        let raw_text = format!("{} | {} | {}", code, title, role);
+        let connected_helpers = format!("Connected: {}", self.connected_helpers);
+        let internet_state = format!("{}", self.internet_state);
+        let raw_text = format!(
+            "{} | {} | {} | {} | {}",
+            code, title, role, connected_helpers, internet_state
+        );
 
         let width = cols as usize;
         let char_count = raw_text.chars().count();
@@ -74,6 +94,26 @@ impl StatusBarHandle {
     pub fn set_code(&self, code: Code) {
         self.tx.send_modify(|s| s.code = Some(code));
     }
+
+    pub fn helper_connected(&self) {
+        self.tx
+            .send_modify(|s| s.connected_helpers = s.connected_helpers.saturating_add_signed(1));
+    }
+
+    pub fn helper_disconnected(&self) {
+        self.tx
+            .send_modify(|s| s.connected_helpers = s.connected_helpers.saturating_sub_signed(1));
+    }
+
+    pub fn offline(&self) {
+        self.tx
+            .send_modify(|s| s.internet_state = InternetState::Offline);
+    }
+
+    pub fn online(&self, ping: Duration) {
+        self.tx
+            .send_modify(|s| s.internet_state = InternetState::Online(ping));
+    }
 }
 
 pub fn render_local_screen(
@@ -99,6 +139,7 @@ pub fn render_local_screen(
         let _ = queue!(
             buf,
             MoveTo(0, physical_row),
+            SetAttribute(crossterm::style::Attribute::Reset),
             Clear(crossterm::terminal::ClearType::UntilNewLine)
         );
         buf.extend_from_slice(&row_bytes);
@@ -106,7 +147,11 @@ pub fn render_local_screen(
 
     // 3. Move terminal cursor to virtual cursor position
     let (cur_r, cur_c) = screen.cursor_position();
-    let _ = queue!(buf, MoveTo(cur_c, cur_r + 1));
+    let _ = queue!(
+        buf,
+        SetAttribute(crossterm::style::Attribute::Reset),
+        MoveTo(cur_c, cur_r + 1)
+    );
 
     buf
 }
