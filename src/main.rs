@@ -16,7 +16,7 @@ use magic_wormhole::{AppID, Code, transfer::APP_CONFIG};
 use crate::{helper::Helper, osc52::copy_to_osc52, victim::Victim};
 
 #[derive(Parser)]
-#[command(about = "Remote rescue shell over magic-wormhole")]
+#[command(about = "Remote rescue shell that runs anywhere, all at once")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -40,25 +40,9 @@ enum Cmd {
 
 #[derive(Debug, Clone, Args)]
 struct CommonArgs {
-    /// Use a custom relay server (specify multiple times for multiple relays)
-    #[arg(
-        long,
-        visible_alias = "relay",
-        action = clap::ArgAction::Append,
-        value_name = "tcp://HOSTNAME:PORT",
-        value_hint = clap::ValueHint::Url,
-        env = "WORMHOLE_RELAY_URL",
-    )]
-    relay_server: Vec<url::Url>,
     /// Use a custom rendezvous server. Both sides need to use the same value in order to find each other.
     #[arg(long, value_name = "ws://example.org", value_hint = clap::ValueHint::Url, env = "WORMHOLE_MAILBOX_URL")]
     rendezvous_server: Option<url::Url>,
-    /// Disable the relay server support and force a direct connection.
-    #[arg(long)]
-    force_direct: bool,
-    /// Always route traffic over a relay server. This hides your IP address from the peer (but not from the server operators. Use Tor for that).
-    #[arg(long, conflicts_with = "force_direct")]
-    force_relay: bool,
 }
 
 #[tokio::main]
