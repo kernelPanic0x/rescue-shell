@@ -4,16 +4,18 @@ use crate::console::{
 };
 use crate::protocol::Msg;
 use crate::protocol::{decode, encode};
+use crate::{ServeArgs, app_config};
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use crossterm::terminal::{enable_raw_mode, size};
 use futures::{SinkExt, StreamExt};
+use iroh::PublicKey;
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{Connection, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
-use magic_wormhole::{AppConfig, Code, MailboxConnection, Wormhole, transfer::AppVersion};
+use magic_wormhole::{Code, MailboxConnection, Wormhole};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -29,7 +31,7 @@ pub struct HelperHub {
 
 impl HelperHub {
     pub async fn start(
-        app_config: AppConfig<AppVersion>,
+        args: ServeArgs,
         statusbar_handle: StatusBarHandle,
         vt_parser: Arc<Mutex<vt100::Parser>>,
     ) -> Result<Self> {
@@ -37,13 +39,14 @@ impl HelperHub {
         let (from_helpers_tx, from_helpers_rx) = mpsc::channel(1000);
 
         let protocol = Protocol::new(
+            &args,
             to_helpers.clone(),
             from_helpers_tx,
             statusbar_handle.clone(),
             vt_parser,
-        );
+        )?;
 
-        let link = Link::new(app_config, protocol, statusbar_handle)
+        let link = Link::new(args, protocol, statusbar_handle)
             .await
             .context("Link creation")?;
 
@@ -171,7 +174,7 @@ pub struct Victim {
 }
 
 impl Victim {
-    pub async fn run(app_config: AppConfig<AppVersion>) -> Result<()> {
+    pub async fn run(args: ServeArgs) -> Result<()> {
         enable_raw_mode()?;
         let _guard = TermGuard;
 
@@ -182,7 +185,7 @@ impl Victim {
 
         let pty = PtySession::spawn(cols, pty_rows)?;
         let console = LocalConsole::new();
-        let hub = HelperHub::start(app_config, statusbar_handle.clone(), vt_parser.clone()).await?;
+        let hub = HelperHub::start(args, statusbar_handle.clone(), vt_parser.clone()).await?;
 
         #[cfg(unix)]
         let mut sigwinch =
@@ -284,6 +287,7 @@ impl Drop for StatusBarClientsGuard {
 }
 
 struct Protocol {
+    allowed_peers: Option<Vec<PublicKey>>,
     from_helper: mpsc::Sender<Msg>,
     to_helpers: broadcast::Sender<Msg>,
     statusbar_handle: StatusBarHandle,
@@ -292,17 +296,35 @@ struct Protocol {
 
 impl Protocol {
     fn new(
+        args: &ServeArgs,
         to_helpers: broadcast::Sender<Msg>,
         from_helper: mpsc::Sender<Msg>,
         statusbar_handle: StatusBarHandle,
         vt_parser: Arc<Mutex<vt100::Parser>>,
-    ) -> Self {
-        Self {
+    ) -> anyhow::Result<Self> {
+        let mut allowed_peers: Option<Vec<PublicKey>> = None;
+
+        if let Some(ref path) = args.allowed_public_keys_file {
+            let contents = std::fs::read_to_string(path)?;
+            let peers: Vec<PublicKey> = contents
+                .split_whitespace()
+                .map(|s| s.parse::<PublicKey>())
+                .collect::<Result<_, _>>()?;
+
+            allowed_peers.get_or_insert_default().extend(peers);
+        }
+
+        if let Some(ref peers) = args.allowed_public_keys {
+            allowed_peers.get_or_insert_default().extend(peers);
+        }
+
+        Ok(Self {
+            allowed_peers,
             from_helper,
             to_helpers,
             statusbar_handle,
             vt_parser,
-        }
+        })
     }
 }
 
@@ -320,6 +342,14 @@ impl std::fmt::Debug for Protocol {
 impl ProtocolHandler for Protocol {
     async fn accept(&self, c: Connection) -> Result<(), AcceptError> {
         if c.alpn() != ALPN {
+            return Err(AcceptError::NotAllowed {
+                meta: n0_error::Meta::default(),
+            });
+        }
+
+        if let Some(ref allowed) = self.allowed_peers
+            && !allowed.contains(&c.remote_id())
+        {
             return Err(AcceptError::NotAllowed {
                 meta: n0_error::Meta::default(),
             });
@@ -386,11 +416,16 @@ struct Link {
 
 impl Link {
     async fn new(
-        app_config: AppConfig<AppVersion>,
+        args: ServeArgs,
         protocol: Protocol,
         statusbar_handle: StatusBarHandle,
     ) -> anyhow::Result<Self> {
-        let secret_key = SecretKey::generate();
+        let secret_key = args
+            .common
+            .private_key
+            .clone()
+            .unwrap_or_else(SecretKey::generate);
+
         let public_key = secret_key.public();
 
         let endpoint = Endpoint::builder(presets::N0)
@@ -408,9 +443,26 @@ impl Link {
         tokio::task::spawn(async move {
             loop {
                 let _ = async {
-                    let mailbox = MailboxConnection::create(app_config.clone(), 2).await?;
+                    let mailbox = match &args.common.code {
+                        Some(code) => {
+                            MailboxConnection::connect(
+                                app_config(&args.common),
+                                code.to_owned(),
+                                true,
+                            )
+                            .await?
+                        }
+                        None => {
+                            MailboxConnection::create(
+                                app_config(&args.common),
+                                args.code_length.unwrap_or(2),
+                            )
+                            .await?
+                        }
+                    };
+
                     let code = mailbox.code();
-                    statusbar_handle.set_code(code.clone());
+                    statusbar_handle.set_code(Some(code.clone()));
 
                     let mut wormhole = Wormhole::connect(mailbox).await?;
                     wormhole.send(public_key.as_bytes().to_vec()).await?;
@@ -418,6 +470,11 @@ impl Link {
                     Ok::<(), anyhow::Error>(())
                 }
                 .await;
+
+                if args.only_once {
+                    statusbar_handle.set_code(None);
+                    break;
+                }
             }
         });
 

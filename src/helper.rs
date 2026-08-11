@@ -1,4 +1,5 @@
 use crate::{
+    ConnectArgs, app_config,
     common::{ALPN, ConnectionStateWatcher},
     console::{LocalConsole, Role, StatusBarHandle, TermGuard, is_detach_key, render_local_screen},
     osc_extractor::Osc52Extractor,
@@ -9,7 +10,7 @@ use bytes::Bytes;
 use crossterm::terminal::{enable_raw_mode, size};
 use futures::{SinkExt, StreamExt};
 use iroh::{Endpoint, PublicKey, SecretKey, endpoint::presets};
-use magic_wormhole::{AppConfig, Code, MailboxConnection, Wormhole, transfer::AppVersion};
+use magic_wormhole::{MailboxConnection, Wormhole};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -25,22 +26,11 @@ pub struct VictimHub {
 }
 
 impl VictimHub {
-    pub async fn connect(
-        app_config: AppConfig<AppVersion>,
-        code: Code,
-        statusbar_handle: StatusBarHandle,
-    ) -> Result<Self> {
+    pub async fn connect(args: ConnectArgs, statusbar_handle: StatusBarHandle) -> Result<Self> {
         let (to_victim_tx, to_victim_rx) = mpsc::channel::<Msg>(1000);
         let (from_victim_tx, from_victim_rx) = mpsc::channel::<Msg>(1000);
 
-        let link = Link::connect(
-            app_config,
-            code,
-            statusbar_handle,
-            to_victim_rx,
-            from_victim_tx,
-        )
-        .await?;
+        let link = Link::connect(args, statusbar_handle, to_victim_rx, from_victim_tx).await?;
 
         Ok(Self {
             to_victim_tx,
@@ -62,7 +52,7 @@ impl VictimHub {
 pub struct Helper;
 
 impl Helper {
-    pub async fn run(app_config: AppConfig<AppVersion>, code: Code) -> Result<()> {
+    pub async fn run(args: ConnectArgs) -> Result<()> {
         enable_raw_mode()?;
         let _guard = TermGuard;
 
@@ -72,7 +62,7 @@ impl Helper {
         let (statusbar_handle, mut statusbar_rx) = StatusBarHandle::new(Role::Helper);
 
         let console = LocalConsole::new();
-        let hub = VictimHub::connect(app_config, code, statusbar_handle.clone()).await?;
+        let hub = VictimHub::connect(args, statusbar_handle.clone()).await?;
 
         // Send initial terminal dimensions to victim shell
         hub.send(Msg::Resize {
@@ -169,20 +159,28 @@ struct Link {
 
 impl Link {
     async fn connect(
-        app_config: AppConfig<AppVersion>,
-        code: Code,
+        args: ConnectArgs,
         statusbar_handle: StatusBarHandle,
         mut to_victim_rx: mpsc::Receiver<Msg>,
         from_victim_tx: mpsc::Sender<Msg>,
     ) -> anyhow::Result<Self> {
-        let mailbox = MailboxConnection::connect(app_config, code, false).await?;
+        let mailbox = MailboxConnection::connect(
+            app_config(&args.common),
+            args.common.code.expect("code always set"),
+            false,
+        )
+        .await?;
         let mut wormhole = Wormhole::connect(mailbox).await?;
         let mut buf = [0u8; 32];
         let bytes = wormhole.receive().await?;
         buf.copy_from_slice(&bytes);
         let victim_public_key: PublicKey = PublicKey::from_bytes(&buf)?;
 
-        let secret_key = SecretKey::generate();
+        let secret_key = args
+            .common
+            .private_key
+            .clone()
+            .unwrap_or_else(SecretKey::generate);
 
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret_key)

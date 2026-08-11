@@ -96,8 +96,8 @@ impl StatusBarHandle {
         (Self { tx }, rx)
     }
 
-    pub fn set_code(&self, code: Code) {
-        self.tx.send_modify(|s| s.code = Some(code));
+    pub fn set_code(&self, code: Option<Code>) {
+        self.tx.send_modify(|s| s.code = code);
     }
 
     pub fn inc_connected(&self) {

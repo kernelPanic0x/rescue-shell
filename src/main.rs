@@ -8,15 +8,24 @@ mod osc_extractor;
 mod protocol;
 mod victim;
 
-use std::{borrow::Cow, str::FromStr};
+use std::{borrow::Cow, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
+use iroh::{PublicKey, SecretKey};
 use magic_wormhole::{AppID, Code, transfer::APP_CONFIG};
 
 use crate::{helper::Helper, osc52::copy_to_osc52, victim::Victim};
 
 #[derive(Parser)]
-#[command(about = "Remote rescue shell that runs anywhere, all at once")]
+#[command(
+    name = "rescue-shell",
+    about = "Remote rescue shell that runs anywhere, all at once",
+    after_help = "\
+Environment Variables:
+    SHELL         Set the shell for the session.
+    RESCUE_SHELL  Is set by rescue-shell to make it more easy to find the executable.
+"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -25,15 +34,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Create a session
-    Serve {
-        #[command(flatten)]
-        common: CommonArgs,
-    },
+    Serve(ServeArgs),
     /// Connect to a session
-    Connect {
-        #[command(flatten)]
-        common: CommonArgs,
-    },
+    Connect(ConnectArgs),
     /// Copys stdin to OSC52 for remote clipboard
     Copy,
 }
@@ -43,6 +46,47 @@ struct CommonArgs {
     /// Use a custom rendezvous server. Both sides need to use the same value in order to find each other.
     #[arg(long, value_name = "ws://example.org", value_hint = clap::ValueHint::Url, env = "WORMHOLE_MAILBOX_URL")]
     rendezvous_server: Option<url::Url>,
+
+    /// Manually set a fixed private key.
+    #[arg(long, env = "RESCUE_SHELL_PRIVATE_KEY")]
+    private_key: Option<SecretKey>,
+
+    /// The wormhole code to establish a connection.
+    #[arg(long, short, env = "RESCUE_SHELL_CODE")]
+    code: Option<Code>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct ConnectArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+struct ServeArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
+    /// Stop generating new wormhole codes after first connection.
+    #[arg(long, default_value = "true", env = "RESCUE_SHELL_ONLY_ONCE")]
+    only_once: bool,
+
+    /// Number of words to use when creating the wormhole code.
+    #[arg(
+        long,
+        short = 'l',
+        conflicts_with = "code",
+        env = "RESCUE_SHELL_CODE_LENGTH"
+    )]
+    code_length: Option<usize>,
+
+    /// Only allow these public keys to connect.
+    #[arg(long, env = "RESCUE_SHELL_ALLOWED_PUBLIC_KEYS")]
+    allowed_public_keys: Option<Vec<PublicKey>>,
+
+    /// Read allowed peers from file seperated by any whitespace.
+    #[arg(long, env = "RESCUE_SHELL_ALLOWED_PUBLIC_KEYS_FILE")]
+    allowed_public_keys_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -50,14 +94,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.cmd {
-        Cmd::Serve { common } => {
-            let config = app_config(&common);
-            Victim::run(config).await
-        }
-        Cmd::Connect { common } => {
-            let config = app_config(&common);
-            let code = Code::from_str(&completer::enter_code()?)?;
-            Helper::run(config, code).await
+        Cmd::Serve(args) => Victim::run(args).await,
+        Cmd::Connect(mut args) => {
+            if args.common.code.is_none() {
+                args.common.code = Some(completer::enter_code()?.parse()?);
+            }
+
+            Helper::run(args).await
         }
         Cmd::Copy => copy_to_osc52(),
     }
