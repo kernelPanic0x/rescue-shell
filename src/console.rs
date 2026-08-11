@@ -44,6 +44,7 @@ pub struct StatusBarState {
     role: Role,
     connected_helpers: u8,
     internet_state: InternetState,
+    tick: usize,
 }
 
 impl StatusBarState {
@@ -53,6 +54,7 @@ impl StatusBarState {
             role,
             connected_helpers: 0,
             internet_state: InternetState::Offline,
+            tick: 0,
         }
     }
 
@@ -73,14 +75,28 @@ impl StatusBarState {
         let width = cols as usize;
         let char_count = raw_text.chars().count();
 
-        // Safely truncate UTF-8 string or pad to width
-        let padded_text = if char_count > width {
-            raw_text.chars().take(width).collect::<String>()
-        } else {
+        // 2. Marquee logic: pad if fits, scroll if too long
+        let padded_text = if char_count <= width {
+            // Fits inside terminal width: pad right with spaces
             format!("{:<width$}", raw_text, width = width)
+        } else {
+            // Exceeds terminal width: cycle continuously with a separator
+            let separator = "   ***   ";
+            let full_text = format!("{raw_text}{separator}");
+            let total_chars = full_text.chars().count();
+
+            let offset = self.tick % total_chars;
+
+            // Safely slice full_text across UTF-8 boundaries starting at `offset`
+            full_text
+                .chars()
+                .cycle()
+                .skip(offset)
+                .take(width)
+                .collect::<String>()
         };
 
-        // Render at top row (Row 0, Col 0 in 0-based crossterm coordinates)
+        // Render at top row
         let _ = queue!(buf, MoveTo(0, 0), Print(padded_text.black().on_white()));
     }
 }
@@ -93,6 +109,23 @@ pub struct StatusBarHandle {
 impl StatusBarHandle {
     pub fn new(role: Role) -> (Self, watch::Receiver<StatusBarState>) {
         let (tx, rx) = watch::channel(StatusBarState::new(role));
+
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            // Adjust scroll speed here (e.g. 300ms per character step)
+            let mut interval = tokio::time::interval(Duration::from_millis(300));
+            loop {
+                interval.tick().await;
+
+                // Stop loop automatically when receiver is dropped
+                if tx_clone.receiver_count() == 0 {
+                    break;
+                }
+
+                tx_clone.send_modify(|s| s.tick = s.tick.wrapping_add(1));
+            }
+        });
+
         (Self { tx }, rx)
     }
 
