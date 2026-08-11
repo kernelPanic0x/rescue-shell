@@ -26,35 +26,43 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_zigbuild: true
+            rustflags: "-C relocation-model=pie"
             ext: ""
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_zigbuild: true
+            rustflags: "-C relocation-model=pie"
             ext: ""
           - target: arm-unknown-linux-musleabihf
             os: ubuntu-latest
             use_zigbuild: true
+            rustflags: "-C relocation-model=pie"
             ext: ""
           - target: x86_64-unknown-freebsd
             os: ubuntu-latest
             use_zigbuild: true
+            rustflags: ""
             ext: ""
           - target: x86_64-apple-darwin
             os: macos-latest
             use_zigbuild: false
+            rustflags: ""
             ext: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             use_zigbuild: false
+            rustflags: ""
             ext: ""
           # --- Windows Targets ---
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             use_zigbuild: false
+            rustflags: ""
             ext: ".exe"
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             use_zigbuild: false
+            rustflags: ""
             ext: ".exe"
 
     steps:
@@ -69,6 +77,8 @@ jobs:
         run: pip install cargo-zigbuild
 
       - name: Build binary
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
             cargo zigbuild --release --target ${{ matrix.target }}
