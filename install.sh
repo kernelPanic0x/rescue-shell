@@ -2,17 +2,28 @@
 # usage: curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | bash
 set -euo pipefail
 
+is_android() {
+    [ -f /system/bin/app_process ] || [ -f /system/build.prop ] || { uname -o 2>/dev/null | grep -qi "android"; }
+}
+
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 case "$OS" in
     Linux)
-        case "$ARCH" in
-            x86_64)               TUPLE="x86_64-unknown-linux-musl" ;;
-            aarch64)              TUPLE="aarch64-unknown-linux-musl" ;;
-            armv6l|armv7l|armv8l) TUPLE="arm-unknown-linux-musleabihf" ;;
-            *)                    die "unsupported Linux architecture: $ARCH" ;;
-        esac
+        if is_android; then
+            case "$ARCH" in
+                aarch64) TUPLE="aarch64-linux-android" ;;
+                *)       die "unsupported Android architecture: $ARCH" ;;
+            esac
+        else
+            case "$ARCH" in
+                x86_64)               TUPLE="x86_64-unknown-linux-musl" ;;
+                aarch64)              TUPLE="aarch64-unknown-linux-musl" ;;
+                armv6l|armv7l|armv8l) TUPLE="arm-unknown-linux-musleabihf" ;;
+                *)                    die "unsupported Linux architecture: $ARCH" ;;
+            esac
+        fi
         ;;
     Darwin)
         case "$ARCH" in

@@ -26,17 +26,22 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_zigbuild: true
-            rustflags: "-C relocation-model=pie"
+            rustflags: ""
             ext: ""
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_zigbuild: true
-            rustflags: "-C relocation-model=pie"
+            rustflags: ""
             ext: ""
           - target: arm-unknown-linux-musleabihf
             os: ubuntu-latest
             use_zigbuild: true
-            rustflags: "-C relocation-model=pie"
+            rustflags: ""
+            ext: ""
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            use_zigbuild: false
+            rustflags: ""
             ext: ""
           - target: x86_64-unknown-freebsd
             os: ubuntu-latest
@@ -76,11 +81,18 @@ jobs:
         if: matrix.use_zigbuild
         run: pip install cargo-zigbuild
 
+      - name: Install cargo-ndk
+        if: matrix.target == 'aarch64-linux-android'
+        run: cargo install cargo-ndk
+
       - name: Build binary
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+          CARGO_NDK_PLATFORM: "23"
         run: |
-          if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
+          if [ "${{ matrix.target }}" = "aarch64-linux-android" ]; then
+            cargo ndk -t aarch64-linux-android build --release
+          elif [ "${{ matrix.use_zigbuild }}" = "true" ]; then
             cargo zigbuild --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
