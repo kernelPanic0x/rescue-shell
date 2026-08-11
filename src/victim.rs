@@ -427,10 +427,7 @@ impl Link {
 fn find_shell() -> String {
     #[cfg(target_os = "windows")]
     {
-        if let Ok(s) = std::env::var("COMSPEC") {
-            return s; // Typically C:\Windows\System32\cmd.exe
-        }
-        "powershell.exe".into()
+        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -441,19 +438,10 @@ fn find_shell() -> String {
             return s;
         }
 
-        // Android/termux shell
-        if let Ok(s) = std::env::var("PREFIX") {
-            let s = format!("{}/bin/sh", s);
-            if std::path::Path::new(&s).exists() {
-                return s;
-            }
-        }
-
-        for c in ["/bin/bash", "/bin/sh", "/bin/ash", "/bin/dash"] {
-            if std::path::Path::new(c).exists() {
-                return c.into();
-            }
-        }
-        "sh".into()
+        ["/bin/sh", "/bin/bash", "/bin/ash", "/bin/dash"]
+            .iter()
+            .find(|p| std::path::Path::new(p).exists())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "sh".into())
     }
 }
