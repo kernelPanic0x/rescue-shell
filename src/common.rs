@@ -1,53 +1,11 @@
 use std::time::Duration;
 
-use crossterm::{
-    cursor::{MoveTo, Show},
-    execute,
-    style::{Attribute, SetAttribute},
-    terminal::{Clear, ClearType, LeaveAlternateScreen, disable_raw_mode},
-};
 use iroh::{Endpoint, Watcher};
 use tokio::time::sleep;
 
-use crate::screen::StatusBarHandle;
+use crate::console::StatusBarHandle;
 
 pub const ALPN: &[u8; 12] = b"rescue-shell";
-
-/// Restore Victim host terminal mode on exit.
-pub struct TermGuard;
-impl Drop for TermGuard {
-    fn drop(&mut self) {
-        let mut stdout = std::io::stdout();
-
-        let _ = execute!(
-            stdout,
-            SetAttribute(Attribute::Reset),
-            LeaveAlternateScreen,
-            Clear(ClearType::All),
-            MoveTo(0, 0),
-            Show
-        );
-
-        let _ = disable_raw_mode();
-
-        println!("\r\n[session ended]");
-    }
-}
-
-pub fn is_detach_key(bytes: &[u8]) -> bool {
-    // Ctrl+] (0x1D) detaches locally
-    bytes.contains(&0x1d)
-}
-
-/// TIOCGWINSZ on /dev/tty — for size negotiation when mirroring.
-#[allow(unused)]
-pub fn console_size() -> Option<(u16, u16)> {
-    use std::os::unix::io::AsRawFd;
-    let f = std::fs::File::open("/dev/tty").ok()?;
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::ioctl(f.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) };
-    (rc == 0 && ws.ws_col > 0).then_some((ws.ws_col, ws.ws_row))
-}
 
 pub struct ConnectionStateWatcher {
     endpoint: Endpoint,

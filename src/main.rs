@@ -1,11 +1,11 @@
 // src/main.rs
 mod common;
 mod completer;
+mod console;
 mod helper;
 mod osc52;
 mod osc_extractor;
 mod protocol;
-mod screen;
 mod victim;
 
 use std::{borrow::Cow, str::FromStr};
