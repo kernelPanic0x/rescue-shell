@@ -16,6 +16,9 @@ jobs:
   build:
     name: Build for ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -23,21 +26,36 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_zigbuild: true
+            ext: ""
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_zigbuild: true
+            ext: ""
           - target: arm-unknown-linux-musleabihf
             os: ubuntu-latest
             use_zigbuild: true
+            ext: ""
           - target: x86_64-unknown-freebsd
             os: ubuntu-latest
             use_zigbuild: true
+            ext: ""
           - target: x86_64-apple-darwin
             os: macos-latest
             use_zigbuild: false
+            ext: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             use_zigbuild: false
+            ext: ""
+          # --- Windows Targets ---
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_zigbuild: false
+            ext: ".exe"
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            use_zigbuild: false
+            ext: ".exe"
 
     steps:
       - name: Checkout code
@@ -60,13 +78,13 @@ jobs:
 
       - name: Prepare artifact
         run: |
-          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} ./${{ env.BINARY_NAME }}-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.ext }} ./${{ env.BINARY_NAME }}-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7.0.1
         with:
           name: binary-${{ matrix.target }}
-          path: ./${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: ./${{ env.BINARY_NAME }}-${{ matrix.target }}${{ matrix.ext }}
 
   publish:
     name: Update Latest Release
