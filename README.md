@@ -1,8 +1,12 @@
-# rescue-shell
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A **remote rescue shell** over [magic-wormhole](https://github.com/magic-wormhole/magic-wormhole).
+# 🛟 rescue-shell
 
-Get an end-to-end encrypted interactive PTY session between two machines across NATs and firewalls — no port forwarding, IP addresses, or accounts required.
+A **remote rescue shell** over [magic-wormhole](https://github.com/magic-wormhole/magic-wormhole) and [iroh](https://github.com/n0-computer/iroh).
+
+Get an end-to-end encrypted interactive PTY session between multiple machines across NATs and firewalls.
+
+![Demo](demo.gif)
 
 ## Quick Start
 
@@ -20,17 +24,11 @@ curl -sL run.any64.de | bash -s -- connect
 ```
 Enter the code when prompted. 
 
-> **Tip:** Press `Ctrl+]` to detach from the session cleanly.
+> **Exit:** Press `Ctrl+]` to detach from the session cleanly.
 
----
+Use `SHELL` environment variable to set a shell.
 
-## Features & Options
-
-* **End-to-End Encrypted:** Leverages magic-wormhole SPAKE2 password-authenticated key exchange.
-* **NAT Traversal:** Tries a direct connection first; automatically falls back to a transit relay if necessary.
-* **Custom Servers:** Configure via environment variables:
-  * `WORMHOLE_RELAY_URL` — set a custom relay server
-  * `WORMHOLE_MAILBOX_URL` — set a custom rendezvous server
+It also sets `RESCUE_SHELL` environment variable to the path of the ELF in case you need the OSC52 copy functionality.
 
 ### CLI Commands
 
@@ -39,11 +37,19 @@ rescue-shell serve [OPTIONS]     # Host a session (Victim)
 rescue-shell connect [OPTIONS]   # Connect to a session (Helper)
 rescue-shell copy                # Copy stdin to OSC52 for remote clipboard
 ```
----
+
+## Tested platforms
+
+| Platform | Status |
+|----------|--------|
+| Raspberry Pi 2B+ | ✅ |
+| Google Pixel 7a (Termux) | ✅ |
+| Arch Linux | ✅ |
+| macOS | ⏳ not yet |
+| Windows | ⏳ not yet |
+| TrueNAS/FreeBSD 14+ | ⏳ not yet |
 
 ## Build from Source
-
-Requires a Rust toolchain (1.75+):
 
 ```bash
 git clone https://github.com/kernelPanic0x/rescue-shell
