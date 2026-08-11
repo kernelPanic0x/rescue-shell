@@ -10,10 +10,15 @@ pub enum Msg {
     Data(Vec<u8>),
 
     /// Helper's terminal size changed (or initial size on connect).
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
 
     /// Graceful shutdown either direction.
     Bye,
+
+    ConnectedHelpers(u8),
 }
 
 pub fn encode(msg: &Msg) -> anyhow::Result<Vec<u8>> {

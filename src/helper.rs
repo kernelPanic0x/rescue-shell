@@ -72,7 +72,7 @@ impl Helper {
         let (statusbar_handle, mut statusbar_rx) = StatusBarHandle::new(Role::Helper);
 
         let console = LocalConsole::new();
-        let hub = VictimHub::connect(app_config, code, statusbar_handle).await?;
+        let hub = VictimHub::connect(app_config, code, statusbar_handle.clone()).await?;
 
         // Send initial terminal dimensions to victim shell
         hub.send(Msg::Resize {
@@ -145,7 +145,10 @@ impl Helper {
                             console.write_stdout(frame).await?;
                         }
                         Some(Msg::Bye) => break Ok(()),
-                        Some(_) => {}
+                        Some(Msg::ConnectedHelpers(n)) => {
+                            statusbar_handle.set_connected(n);
+                        },
+                        Some(Msg::Resize {..}) => {},
                         None => break Err(anyhow!("channel closed")).context("Recv from victim"),
                     }
                 }

@@ -181,7 +181,7 @@ impl Victim {
 
         let pty = PtySession::spawn(cols, pty_rows)?;
         let console = LocalConsole::new();
-        let hub = HelperHub::start(app_config, statusbar_handle, vt_parser.clone()).await?;
+        let hub = HelperHub::start(app_config, statusbar_handle.clone(), vt_parser.clone()).await?;
 
         #[cfg(unix)]
         let mut sigwinch =
@@ -198,6 +198,8 @@ impl Victim {
                 _ = statusbar_rx.changed() => {
                     let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
                     console.write_stdout(frame).await?;
+
+                    hub.broadcast(Msg::ConnectedHelpers(statusbar_handle.get_connected()));
                 }
 
                 // Shell output -> Mirror locally AND send to Helpers
@@ -227,6 +229,7 @@ impl Victim {
                             pty.resize(cols, rows)?;
                         }
                         Msg::Bye => {},
+                        Msg::ConnectedHelpers(_) => {},
                     }
                 }
 
