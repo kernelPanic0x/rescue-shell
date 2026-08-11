@@ -64,6 +64,10 @@ impl HelperHub {
     pub async fn recv(&self) -> Option<Msg> {
         self.from_helpers_rx.lock().await.recv().await
     }
+
+    pub async fn shutdown(&self) {
+        self.link.shutdown().await
+    }
 }
 
 pub struct PtySession {
@@ -181,7 +185,8 @@ impl Victim {
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
         let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(pty_rows, cols, 1000)));
-        let (statusbar_handle, mut statusbar_rx) = StatusBarHandle::new(Role::Victim);
+        let statusbar_handle = StatusBarHandle::new(Role::Victim);
+        let mut statusbar_rx = statusbar_handle.subscribe();
 
         let pty = PtySession::spawn(cols, pty_rows)?;
         let console = LocalConsole::new();
@@ -263,6 +268,7 @@ impl Victim {
         };
 
         hub.broadcast(Msg::Bye);
+        hub.shutdown().await;
         console.flush_and_close().await;
 
         res
@@ -442,7 +448,7 @@ impl Link {
 
         tokio::task::spawn(async move {
             loop {
-                let _ = async {
+                let wormhole = async {
                     let mailbox = match &args.common.code {
                         Some(code) => {
                             MailboxConnection::connect(
@@ -468,17 +474,39 @@ impl Link {
                     wormhole.send(public_key.as_bytes().to_vec()).await?;
 
                     Ok::<(), anyhow::Error>(())
-                }
-                .await;
+                };
 
-                if args.only_once {
-                    statusbar_handle.set_code(None);
-                    break;
+                let not_alone = async {
+                    if args.multiple_helpers {
+                        // continue generating codes
+                        let _ = std::future::pending::<Result<()>>().await;
+                    } else {
+                        let _ = statusbar_handle
+                            .subscribe()
+                            .wait_for(|s| s.connected_helpers > 0)
+                            .await;
+                    }
+
+                    Ok::<(), anyhow::Error>(())
+                };
+
+                tokio::select! {
+                    _ = wormhole => {}
+                    _ = not_alone => {
+                        statusbar_handle.set_code(None);
+
+                        // wait until alone again
+                        let _ = statusbar_handle.subscribe().wait_for(|s| s.connected_helpers == 0).await;
+                    }
                 }
             }
         });
 
         Ok(Self { secret_key, router })
+    }
+
+    pub async fn shutdown(&self) {
+        let _ = self.router.shutdown().await;
     }
 }
 

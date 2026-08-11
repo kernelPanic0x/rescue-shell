@@ -15,7 +15,10 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+    sync::mpsc,
+    time::timeout,
+};
 use tokio_util::codec::LengthDelimitedCodec;
 
 pub struct VictimHub {
@@ -46,6 +49,10 @@ impl VictimHub {
     pub async fn recv(&self) -> Option<Msg> {
         self.from_victim_rx.lock().await.recv().await
     }
+
+    pub async fn shutdown(&self) {
+        self.link.shutdown().await
+    }
 }
 
 #[derive(Default)]
@@ -59,7 +66,8 @@ impl Helper {
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
         let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(pty_rows, cols, 1000)));
-        let (statusbar_handle, mut statusbar_rx) = StatusBarHandle::new(Role::Helper);
+        let statusbar_handle = StatusBarHandle::new(Role::Helper);
+        let mut statusbar_rx = statusbar_handle.subscribe();
 
         let console = LocalConsole::new();
         let hub = VictimHub::connect(args, statusbar_handle.clone()).await?;
@@ -146,6 +154,7 @@ impl Helper {
         };
 
         let _ = hub.send(Msg::Bye).await;
+        hub.shutdown().await;
         console.flush_and_close().await;
 
         res
@@ -238,5 +247,9 @@ impl Link {
         });
 
         Ok(Self { endpoint })
+    }
+
+    pub async fn shutdown(&self) {
+        self.endpoint.close().await
     }
 }

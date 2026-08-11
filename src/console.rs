@@ -40,11 +40,11 @@ pub enum Role {
 
 #[derive(Clone, Debug)]
 pub struct StatusBarState {
-    code: Option<Code>,
-    role: Role,
-    connected_helpers: u8,
-    internet_state: InternetState,
-    tick: usize,
+    pub code: Option<Code>,
+    pub role: Role,
+    pub connected_helpers: u8,
+    pub internet_state: InternetState,
+    pub tick: usize,
 }
 
 impl StatusBarState {
@@ -107,8 +107,8 @@ pub struct StatusBarHandle {
 }
 
 impl StatusBarHandle {
-    pub fn new(role: Role) -> (Self, watch::Receiver<StatusBarState>) {
-        let (tx, rx) = watch::channel(StatusBarState::new(role));
+    pub fn new(role: Role) -> Self {
+        let (tx, _) = watch::channel(StatusBarState::new(role));
 
         let tx_clone = tx.clone();
         tokio::spawn(async move {
@@ -126,7 +126,7 @@ impl StatusBarHandle {
             }
         });
 
-        (Self { tx }, rx)
+        Self { tx }
     }
 
     pub fn set_code(&self, code: Option<Code>) {
@@ -159,6 +159,10 @@ impl StatusBarHandle {
     pub fn online(&self, ping: Duration) {
         self.tx
             .send_modify(|s| s.internet_state = InternetState::Online(ping));
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<StatusBarState> {
+        self.tx.subscribe()
     }
 }
 

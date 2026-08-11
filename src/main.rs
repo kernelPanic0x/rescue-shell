@@ -67,9 +67,9 @@ struct ServeArgs {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Stop generating new wormhole codes after first connection.
-    #[arg(long, default_value = "true", env = "RESCUE_SHELL_ONLY_ONCE")]
-    only_once: bool,
+    /// Generate new codes to allow multiple connected helpers at once.
+    #[arg(long, env = "RESCUE_SHELL_MULTIPLE_HELPERS")]
+    multiple_helpers: bool,
 
     /// Number of words to use when creating the wormhole code.
     #[arg(
