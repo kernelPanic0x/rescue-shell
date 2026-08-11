@@ -425,15 +425,26 @@ impl Link {
 }
 
 fn find_shell() -> String {
-    if let Ok(s) = std::env::var("SHELL")
-        && std::path::Path::new(&s).exists()
+    #[cfg(target_os = "windows")]
     {
-        return s;
-    }
-    for c in ["/bin/bash", "/bin/sh", "/bin/ash", "/bin/dash"] {
-        if std::path::Path::new(c).exists() {
-            return c.into();
+        if let Ok(s) = std::env::var("COMSPEC") {
+            return s; // Typically C:\Windows\System32\cmd.exe
         }
+        "powershell.exe".into()
     }
-    "sh".into()
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(s) = std::env::var("SHELL")
+            && std::path::Path::new(&s).exists()
+        {
+            return s;
+        }
+        for c in ["/bin/bash", "/bin/sh", "/bin/ash", "/bin/dash"] {
+            if std::path::Path::new(c).exists() {
+                return c.into();
+            }
+        }
+        "sh".into()
+    }
 }
