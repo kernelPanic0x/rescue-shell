@@ -440,6 +440,15 @@ fn find_shell() -> String {
         {
             return s;
         }
+
+        // Android/termux shell
+        if let Ok(s) = std::env::var("PREFIX") {
+            let s = format!("{}/bin/sh", s);
+            if std::path::Path::new(&s).exists() {
+                return s;
+            }
+        }
+
         for c in ["/bin/bash", "/bin/sh", "/bin/ash", "/bin/dash"] {
             if std::path::Path::new(c).exists() {
                 return c.into();
