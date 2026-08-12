@@ -17,8 +17,7 @@ use magic_wormhole::Code;
 use termwiz::escape::{
     Action, CSI, OneBased,
     csi::{
-        Cursor, Device, DeviceAttribute, DeviceAttributeCodes, DeviceAttributeFlags,
-        DeviceAttributes,
+        Cursor, Device,
     },
 };
 use tokio::sync::{mpsc, watch};
@@ -323,21 +322,11 @@ fn xtversion(program: &str, version: &str) -> Vec<u8> {
     format!("\x1bP>|{program} {version}\x1b\\").into_bytes()
 }
 
-/// Build the DA1 reply via the typed path (round-trips through Display):
-/// `CSI ? 62 c` with attribute codes 1;9;15;22;29.
-fn da1() -> Vec<u8> {
-    let flags = DeviceAttributeFlags::new(vec![
-        DeviceAttribute::Code(DeviceAttributeCodes::Columns132),
-        DeviceAttribute::Code(DeviceAttributeCodes::NationalReplacementCharsets),
-        DeviceAttribute::Code(DeviceAttributeCodes::TechnicalCharacters),
-        DeviceAttribute::Code(DeviceAttributeCodes::AnsiColor),
-        DeviceAttribute::Code(DeviceAttributeCodes::AnsiTextLocator),
-    ]);
-    let action = Action::CSI(CSI::Device(Box::new(Device::DeviceAttributes(
-        DeviceAttributes::Vt220(flags),
-    ))));
-    format!("{action}").into_bytes()
-}
+/// OSC 52 is advertised via DA1 extension flag `52`.
+/// - 62 = VT220 class, 1/9/15/22/29 = common VT220 attrs,
+/// - 52 = "supports OSC 52 clipboard writes" (new agreed extension;
+///   read by vim 9.1.1666+, tmux, Windows Terminal, upcoming nvim).
+const DA1: &[u8] = b"\x1b[?62;1;9;15;22;29;52c";
 
 pub fn process_pty_output(
     chunk: &[u8],
@@ -350,7 +339,7 @@ pub fn process_pty_output(
         if let Action::CSI(csi) = &action {
             match csi {
                 CSI::Device(boxed) => match boxed.as_ref() {
-                    Device::RequestPrimaryDeviceAttributes => reply.extend_from_slice(&da1()),
+                    Device::RequestPrimaryDeviceAttributes => reply.extend_from_slice(DA1),
                     Device::RequestSecondaryDeviceAttributes => reply.extend_from_slice(DA2),
                     Device::RequestTerminalNameAndVersion => reply.extend_from_slice(&xtversion(
                         env!("CARGO_PKG_NAME"),
