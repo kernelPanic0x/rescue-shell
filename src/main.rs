@@ -19,10 +19,11 @@ use crate::{helper::Helper, osc52::copy_to_osc52, victim::Victim};
 #[derive(Parser)]
 #[command(
     name = "rescue-shell",
-    about = "Remote rescue shell that runs anywhere, all at once",
+    about = "A remote rescue shell that runs everywhere, all at once.",
     after_help = "\
 Environment Variables:
     SHELL         Set the shell for the session.
+                  You can use `echo \"example text\" | $SHELL copy` to copy to helper clipboard.
     RESCUE_SHELL  Is set by rescue-shell to make it more easy to find the executable.
 "
 )]
