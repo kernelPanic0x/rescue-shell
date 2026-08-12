@@ -20,7 +20,6 @@ use termwiz::escape::{
         Cursor, Device, DeviceAttribute, DeviceAttributeCodes, DeviceAttributeFlags,
         DeviceAttributes,
     },
-    parser::Parser,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -246,38 +245,39 @@ pub fn is_detach_key(bytes: &[u8]) -> bool {
 }
 
 pub struct LocalConsole {
-    stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
-    stdout_tx: mpsc::Sender<Bytes>,
+    stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>, // local keyboard
+    stdout_tx: mpsc::Sender<Bytes>,                      // rendered frames -> local terminal
     stdout_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl LocalConsole {
     pub fn new() -> Self {
+        // Keyboard reader: blocking std::io::stdin() on a plain OS thread,
+        // pushed into the channel that the async loop consumes.
         let (stdin_tx, stdin_rx) = mpsc::channel::<Bytes>(64);
         std::thread::spawn(move || {
-            let mut stdin = std::io::stdin();
             let mut buf = [0u8; 1024];
-
             loop {
-                match stdin.read(&mut buf) {
+                match std::io::stdin().read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         if stdin_tx
                             .blocking_send(Bytes::copy_from_slice(&buf[..n]))
                             .is_err()
                         {
-                            break;
+                            break; // loop ended -> stop reading
                         }
                     }
                 }
             }
         });
 
+        // Local-screen writer: single std::io::stdout() task, ordered by mpsc.
         let (stdout_tx, mut stdout_rx) = mpsc::channel::<Bytes>(64);
         let stdout_handle = tokio::task::spawn_blocking(move || {
             let mut stdout = std::io::stdout();
-            while let Some(bytes) = stdout_rx.blocking_recv() {
-                if stdout.write_all(&bytes).is_err() || stdout.flush().is_err() {
+            while let Some(b) = stdout_rx.blocking_recv() {
+                if stdout.write_all(&b).is_err() || stdout.flush().is_err() {
                     break;
                 }
             }
@@ -291,12 +291,7 @@ impl LocalConsole {
     }
 
     pub async fn read_stdin(&self) -> Option<Bytes> {
-        self.stdin_rx
-            .lock()
-            .await
-            .recv()
-            .await
-            .map(|v| Bytes::from(v))
+        self.stdin_rx.lock().await.recv().await
     }
 
     pub async fn write_stdout(&self, frame: Bytes) -> anyhow::Result<()> {
@@ -306,100 +301,75 @@ impl LocalConsole {
     pub async fn flush_and_close(self) {
         drop(self.stdout_tx);
         let handle = self.stdout_handle.lock().await.take();
-        if let Some(handle) = handle {
-            let _ = handle.await;
+        if let Some(h) = handle {
+            let _ = h.await; // drain remaining frames to the local terminal
         }
     }
 }
 
-pub fn process_pty_output<W: Write>(
-    chunk: &[u8],
-    vt100_cursor: (u16, u16), // (row, col) 0-indexed from your vt100 parser
-    pty_writer: &mut W,
-    parser: &mut Parser,
-) -> anyhow::Result<()> {
-    let actions = parser.parse_as_vec(chunk);
+/// Secondary Device Attributes reply. DCS/DA responses like this one have no
+/// typed variant in termwiz (which models only the *request*), so the shell
+/// wire format is a named constant. WezTerm answers identically: Pp=1 (VT220),
+/// Pv=277 (xterm patch level -> fish enables ttymouse=sgr / 24-bit color).
+const DA2: &[u8] = b"\x1b[>1;277;0c";
 
-    // Collect replies in bytes, then write everything in one shot so a chunk
-    // containing several queries (fish sends DA1+DA2+DSR+CPR together) is
-    // answered atomically. `Vec<u8>` implements std::io::Write, so `write!`
-    // renders a typed Action into bytes via its `Display` impl.
+/// Device Status Report reply. termwiz only knows the query `5n`; the answer
+/// "ready, no malfunction" must be emitted directly.
+const DSR_OK: &[u8] = b"\x1b[0n";
+
+/// XTVERSION reply, a DCS sequence `ESC P >| <prog> <version> ESC \`.
+/// termwiz models `>q` as the request only; the response is the DCS body.
+fn xtversion(program: &str, version: &str) -> Vec<u8> {
+    format!("\x1bP>|{program} {version}\x1b\\").into_bytes()
+}
+
+/// Build the DA1 reply via the typed path (round-trips through Display):
+/// `CSI ? 62 c` with attribute codes 1;9;15;22;29.
+fn da1() -> Vec<u8> {
+    let flags = DeviceAttributeFlags::new(vec![
+        DeviceAttribute::Code(DeviceAttributeCodes::Columns132),
+        DeviceAttribute::Code(DeviceAttributeCodes::NationalReplacementCharsets),
+        DeviceAttribute::Code(DeviceAttributeCodes::TechnicalCharacters),
+        DeviceAttribute::Code(DeviceAttributeCodes::AnsiColor),
+        DeviceAttribute::Code(DeviceAttributeCodes::AnsiTextLocator),
+    ]);
+    let action = Action::CSI(CSI::Device(Box::new(Device::DeviceAttributes(
+        DeviceAttributes::Vt220(flags),
+    ))));
+    format!("{action}").into_bytes()
+}
+
+pub fn process_pty_output(
+    chunk: &[u8],
+    vt100_parser: Arc<Mutex<vt100::Parser>>,
+    parser: &mut termwiz::escape::parser::Parser,
+) -> anyhow::Result<Option<Bytes>> {
     let mut reply = Vec::new();
 
-    for action in actions {
+    for action in parser.parse_as_vec(chunk) {
         if let Action::CSI(csi) = &action {
             match csi {
                 CSI::Device(boxed) => match boxed.as_ref() {
-                    // ---------- ESC [ c   (DA1, Primary Device Attributes) ----------
-                    // Query parses as `RequestPrimaryDeviceAttributes`, NOT a
-                    // `DeviceAttributes::Query(..)`.
-                    Device::RequestPrimaryDeviceAttributes => {
-                        // Report a VT220 with a few common attribute codes.
-                        // This renders as: \x1b[?62;1;9;15;22;29c
-                        let flags = DeviceAttributeFlags::new(vec![
-                            DeviceAttribute::Code(DeviceAttributeCodes::Columns132),
-                            DeviceAttribute::Code(
-                                DeviceAttributeCodes::NationalReplacementCharsets,
-                            ),
-                            DeviceAttribute::Code(DeviceAttributeCodes::TechnicalCharacters),
-                            DeviceAttribute::Code(DeviceAttributeCodes::AnsiColor),
-                            DeviceAttribute::Code(DeviceAttributeCodes::AnsiTextLocator),
-                        ]);
-                        let response = Action::CSI(CSI::Device(Box::new(
-                            Device::DeviceAttributes(DeviceAttributes::Vt220(flags)),
-                        )));
-                        write!(reply, "{}", response)?;
-                    }
-
-                    // ---------- ESC [ > c   (DA2, Secondary Device Attributes) ----------
-                    // fish specifically reads the "Pp;Pv;Pc" reply: Pp=1 => VT220,
-                    // Pv = firmware/patch version. 277 = xterm patch level, which
-                    // makes fish treat us as an xterm-compatible terminal
-                    // (sets ttymouse=sgr, 24-bit color, etc.). No typed reply
-                    // variant exists, so emit the bytes directly (as wezterm does).
-                    Device::RequestSecondaryDeviceAttributes => {
-                        reply.extend_from_slice(b"\x1b[>1;277;0c");
-                    }
-
-                    // ---------- ESC [ > q   (XTVERSION, terminal name+version) ----------
-                    // Reply is a DCS sequence: ESC P >| <prog> <version> ESC \
-                    Device::RequestTerminalNameAndVersion => {
-                        reply.extend_from_slice(b"\x1bP>|termwiz 0.23.3\x1b\\");
-                    }
-
-                    // ---------- ESC [ 5 n   (DSR, Device Status Report) ----------
-                    // Parses as `Device::StatusReport` (NOT a Cursor variant).
-                    // Answer "ready, no malfunction" with ESC [ 0 n, exactly
-                    // like wezterm does (there is no typed response variant).
-                    Device::StatusReport => {
-                        reply.extend_from_slice(b"\x1b[0n");
-                    }
-
+                    Device::RequestPrimaryDeviceAttributes => reply.extend_from_slice(&da1()),
+                    Device::RequestSecondaryDeviceAttributes => reply.extend_from_slice(DA2),
+                    Device::RequestTerminalNameAndVersion => reply.extend_from_slice(&xtversion(
+                        env!("CARGO_PKG_NAME"),
+                        env!("CARGO_PKG_VERSION"),
+                    )),
+                    Device::StatusReport => reply.extend_from_slice(DSR_OK),
                     _ => {}
                 },
-
-                // ---------- ESC [ 6 n   (CPR / DSR-6, Cursor Position Report) ----------
-                // Parses as `Cursor::RequestActivePositionReport`. The reply
-                // must be built as the struct variant `ActivePositionReport`
-                // (NOT `Cursor::Position`, which is CUP = ESC [ r;c H).
                 CSI::Cursor(Cursor::RequestActivePositionReport) => {
-                    let (row_0_idx, col_0_idx) = vt100_cursor;
-                    let response = Action::CSI(CSI::Cursor(Cursor::ActivePositionReport {
-                        line: OneBased::from_zero_based(row_0_idx as u32),
-                        col: OneBased::from_zero_based(col_0_idx as u32),
+                    let (row, col) = vt100_parser.lock().unwrap().screen().cursor_position();
+                    let r = Action::CSI(CSI::Cursor(Cursor::ActivePositionReport {
+                        line: OneBased::from_zero_based(row as u32),
+                        col: OneBased::from_zero_based(col as u32),
                     }));
-                    write!(reply, "{}", response)?; // renders "\x1b[{line};{col}R"
+                    write!(reply, "{r}")?;
                 }
-
                 _ => {}
             }
         }
     }
-
-    if !reply.is_empty() {
-        pty_writer.write_all(&reply)?;
-        pty_writer.flush()?;
-    }
-
-    Ok(())
+    Ok((!reply.is_empty()).then_some(Bytes::from(reply)))
 }

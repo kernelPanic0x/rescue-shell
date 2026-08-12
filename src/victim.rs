@@ -1,6 +1,7 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
-    LocalConsole, Role, StatusBarHandle, TermGuard, is_detach_key, render_local_screen,
+    LocalConsole, Role, StatusBarHandle, TermGuard, is_detach_key, process_pty_output,
+    render_local_screen,
 };
 use crate::protocol::Msg;
 use crate::protocol::{decode, encode};
@@ -190,6 +191,7 @@ impl Victim {
 
         let pty = PtySession::spawn(cols, pty_rows)?;
         let console = LocalConsole::new();
+        let mut queries = termwiz::escape::parser::Parser::new();
         let hub = HelperHub::start(args, statusbar_handle.clone(), vt_parser.clone()).await?;
 
         #[cfg(unix)]
@@ -213,7 +215,14 @@ impl Victim {
 
                 // Shell output -> Mirror locally AND send to Helpers
                 Some(bytes) = pty.read_output() => {
+                    // Model the screen FIRST so the CPR reply uses the post-chunk cursor.
                     vt_parser.lock().unwrap().process(&bytes);
+
+                    // Answer device queries (DA1/DA2/DSR/CPR/XTVERSION) back to the shell.
+                    if let Some(reply) = process_pty_output(&bytes, vt_parser.clone(), &mut queries)? {
+                        pty.write_input(reply).await?;
+                    }
+
                     let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
                     console.write_stdout(frame).await?;
 
@@ -376,7 +385,7 @@ impl ProtocolHandler for Protocol {
         };
 
         if let Ok(encoded) = encode(&Msg::Data(initial_state)) {
-            let _ = raw_writer.send(Bytes::from(encoded)).await;
+            let _ = raw_writer.send(encoded).await;
         }
 
         let helper_victim = tokio::spawn(async move {
@@ -393,7 +402,7 @@ impl ProtocolHandler for Protocol {
         let victim_helper = tokio::spawn(async move {
             loop {
                 let msg = to_helpers.recv().await?;
-                raw_writer.send(Bytes::from(encode(&msg)?)).await?;
+                raw_writer.send(encode(&msg)?).await?;
             }
 
             #[allow(unreachable_code)]
