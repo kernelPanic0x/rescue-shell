@@ -35,8 +35,8 @@ impl HelperHub {
         statusbar_handle: StatusBarHandle,
         vt_parser: Arc<Mutex<vt100::Parser>>,
     ) -> Result<Self> {
-        let (to_helpers, _) = broadcast::channel(1000);
-        let (from_helpers_tx, from_helpers_rx) = mpsc::channel(1000);
+        let (to_helpers, _) = broadcast::channel(64);
+        let (from_helpers_tx, from_helpers_rx) = mpsc::channel(64);
 
         let protocol = Protocol::new(
             &args,
@@ -72,7 +72,7 @@ impl HelperHub {
 
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
-    to_pty_tx: mpsc::Sender<Vec<u8>>,
+    to_pty_tx: mpsc::Sender<Bytes>,
     pty_out_rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
     child_exit: tokio::sync::Mutex<
         Option<tokio::task::JoinHandle<std::io::Result<portable_pty::ExitStatus>>>,
@@ -119,7 +119,7 @@ impl PtySession {
             }
         });
 
-        let (to_pty_tx, mut to_pty_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (to_pty_tx, mut to_pty_rx) = mpsc::channel::<Bytes>(64);
         tokio::task::spawn_blocking(move || {
             while let Some(bytes) = to_pty_rx.blocking_recv() {
                 if pty_writer.write_all(&bytes).is_err() {
@@ -142,7 +142,7 @@ impl PtySession {
         self.pty_out_rx.lock().await.recv().await
     }
 
-    pub async fn write_input(&self, bytes: Vec<u8>) -> Result<()> {
+    pub async fn write_input(&self, bytes: Bytes) -> Result<()> {
         self.to_pty_tx.send(bytes).await.map_err(|e| anyhow!(e))
     }
 
@@ -217,7 +217,7 @@ impl Victim {
                     let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
                     console.write_stdout(frame).await?;
 
-                    hub.broadcast(Msg::Data(bytes));
+                    hub.broadcast(Msg::Data(Bytes::from(bytes)));
                 }
 
                 // Victim local typing -> Send to PTY
@@ -372,7 +372,7 @@ impl ProtocolHandler for Protocol {
 
         let initial_state = {
             let parser = self.vt_parser.lock().unwrap();
-            parser.screen().state_formatted()
+            Bytes::from(parser.screen().state_formatted())
         };
 
         if let Ok(encoded) = encode(&Msg::Data(initial_state)) {

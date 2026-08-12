@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 enum State {
     #[default]
@@ -18,7 +20,7 @@ impl Osc52Extractor {
     /// Strips everything EXCEPT complete OSC 52 escape sequences from the byte stream.
     /// Buffers partial sequences across chunk boundaries to ensure atomic delivery
     /// to the local terminal (Alacritty) without being aborted by screen redraws.
-    pub fn extract(&mut self, input: &[u8]) -> Vec<u8> {
+    pub fn extract(&mut self, input: &[u8]) -> Bytes {
         let mut output = Vec::new();
 
         for &b in input {
@@ -104,7 +106,7 @@ impl Osc52Extractor {
             }
         }
 
-        output
+        Bytes::from(output)
     }
 
     fn flush_complete_osc52(&mut self, output: &mut Vec<u8>) {

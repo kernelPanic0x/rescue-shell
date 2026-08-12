@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use wincode::{SchemaRead, SchemaWrite};
 
 /// Every message on the wire. The wormhole channel is already
@@ -7,7 +8,7 @@ pub enum Msg {
     /// Terminal bytes. Direction depends on context:
     /// helper→victim: keystrokes for the PTY.
     /// victim→helper: shell output for the screen.
-    Data(Vec<u8>),
+    Data(Bytes),
 
     /// Helper's terminal size changed (or initial size on connect).
     Resize {
@@ -21,8 +22,8 @@ pub enum Msg {
     ConnectedHelpers(u8),
 }
 
-pub fn encode(msg: &Msg) -> anyhow::Result<Vec<u8>> {
-    Ok(wincode::serialize(msg)?)
+pub fn encode(msg: &Msg) -> anyhow::Result<Bytes> {
+    Ok(Bytes::from(wincode::serialize(msg)?))
 }
 
 pub fn decode(bytes: &[u8]) -> anyhow::Result<Msg> {

@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::anyhow;
+use bytes::Bytes;
 use crossterm::{
     cursor::{MoveTo, Show},
     execute, queue,
@@ -13,6 +14,14 @@ use crossterm::{
     terminal::{Clear, ClearType, LeaveAlternateScreen, disable_raw_mode},
 };
 use magic_wormhole::Code;
+use termwiz::escape::{
+    Action, CSI, OneBased,
+    csi::{
+        Cursor, Device, DeviceAttribute, DeviceAttributeCodes, DeviceAttributeFlags,
+        DeviceAttributes,
+    },
+    parser::Parser,
+};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Clone, Debug)]
@@ -171,7 +180,7 @@ pub fn render_local_screen(
     status_bar: &StatusBarState,
     cols: u16,
     total_rows: u16,
-) -> Vec<u8> {
+) -> Bytes {
     let parser = parser.lock().unwrap();
     let mut buf = Vec::new();
     let screen = parser.screen();
@@ -207,7 +216,7 @@ pub fn render_local_screen(
         MoveTo(cur_c, cur_r + 1)
     );
 
-    buf
+    Bytes::from(buf)
 }
 
 /// Restore Victim host terminal mode on exit.
@@ -237,22 +246,26 @@ pub fn is_detach_key(bytes: &[u8]) -> bool {
 }
 
 pub struct LocalConsole {
-    stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
-    stdout_tx: mpsc::Sender<Vec<u8>>,
+    stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
+    stdout_tx: mpsc::Sender<Bytes>,
     stdout_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl LocalConsole {
     pub fn new() -> Self {
-        let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (stdin_tx, stdin_rx) = mpsc::channel::<Bytes>(64);
         std::thread::spawn(move || {
             let mut stdin = std::io::stdin();
             let mut buf = [0u8; 1024];
+
             loop {
                 match stdin.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        if stdin_tx
+                            .blocking_send(Bytes::copy_from_slice(&buf[..n]))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -260,7 +273,7 @@ impl LocalConsole {
             }
         });
 
-        let (stdout_tx, mut stdout_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (stdout_tx, mut stdout_rx) = mpsc::channel::<Bytes>(64);
         let stdout_handle = tokio::task::spawn_blocking(move || {
             let mut stdout = std::io::stdout();
             while let Some(bytes) = stdout_rx.blocking_recv() {
@@ -277,11 +290,16 @@ impl LocalConsole {
         }
     }
 
-    pub async fn read_stdin(&self) -> Option<Vec<u8>> {
-        self.stdin_rx.lock().await.recv().await
+    pub async fn read_stdin(&self) -> Option<Bytes> {
+        self.stdin_rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .map(|v| Bytes::from(v))
     }
 
-    pub async fn write_stdout(&self, frame: Vec<u8>) -> anyhow::Result<()> {
+    pub async fn write_stdout(&self, frame: Bytes) -> anyhow::Result<()> {
         self.stdout_tx.send(frame).await.map_err(|e| anyhow!(e))
     }
 
@@ -292,4 +310,96 @@ impl LocalConsole {
             let _ = handle.await;
         }
     }
+}
+
+pub fn process_pty_output<W: Write>(
+    chunk: &[u8],
+    vt100_cursor: (u16, u16), // (row, col) 0-indexed from your vt100 parser
+    pty_writer: &mut W,
+    parser: &mut Parser,
+) -> anyhow::Result<()> {
+    let actions = parser.parse_as_vec(chunk);
+
+    // Collect replies in bytes, then write everything in one shot so a chunk
+    // containing several queries (fish sends DA1+DA2+DSR+CPR together) is
+    // answered atomically. `Vec<u8>` implements std::io::Write, so `write!`
+    // renders a typed Action into bytes via its `Display` impl.
+    let mut reply = Vec::new();
+
+    for action in actions {
+        if let Action::CSI(csi) = &action {
+            match csi {
+                CSI::Device(boxed) => match boxed.as_ref() {
+                    // ---------- ESC [ c   (DA1, Primary Device Attributes) ----------
+                    // Query parses as `RequestPrimaryDeviceAttributes`, NOT a
+                    // `DeviceAttributes::Query(..)`.
+                    Device::RequestPrimaryDeviceAttributes => {
+                        // Report a VT220 with a few common attribute codes.
+                        // This renders as: \x1b[?62;1;9;15;22;29c
+                        let flags = DeviceAttributeFlags::new(vec![
+                            DeviceAttribute::Code(DeviceAttributeCodes::Columns132),
+                            DeviceAttribute::Code(
+                                DeviceAttributeCodes::NationalReplacementCharsets,
+                            ),
+                            DeviceAttribute::Code(DeviceAttributeCodes::TechnicalCharacters),
+                            DeviceAttribute::Code(DeviceAttributeCodes::AnsiColor),
+                            DeviceAttribute::Code(DeviceAttributeCodes::AnsiTextLocator),
+                        ]);
+                        let response = Action::CSI(CSI::Device(Box::new(
+                            Device::DeviceAttributes(DeviceAttributes::Vt220(flags)),
+                        )));
+                        write!(reply, "{}", response)?;
+                    }
+
+                    // ---------- ESC [ > c   (DA2, Secondary Device Attributes) ----------
+                    // fish specifically reads the "Pp;Pv;Pc" reply: Pp=1 => VT220,
+                    // Pv = firmware/patch version. 277 = xterm patch level, which
+                    // makes fish treat us as an xterm-compatible terminal
+                    // (sets ttymouse=sgr, 24-bit color, etc.). No typed reply
+                    // variant exists, so emit the bytes directly (as wezterm does).
+                    Device::RequestSecondaryDeviceAttributes => {
+                        reply.extend_from_slice(b"\x1b[>1;277;0c");
+                    }
+
+                    // ---------- ESC [ > q   (XTVERSION, terminal name+version) ----------
+                    // Reply is a DCS sequence: ESC P >| <prog> <version> ESC \
+                    Device::RequestTerminalNameAndVersion => {
+                        reply.extend_from_slice(b"\x1bP>|termwiz 0.23.3\x1b\\");
+                    }
+
+                    // ---------- ESC [ 5 n   (DSR, Device Status Report) ----------
+                    // Parses as `Device::StatusReport` (NOT a Cursor variant).
+                    // Answer "ready, no malfunction" with ESC [ 0 n, exactly
+                    // like wezterm does (there is no typed response variant).
+                    Device::StatusReport => {
+                        reply.extend_from_slice(b"\x1b[0n");
+                    }
+
+                    _ => {}
+                },
+
+                // ---------- ESC [ 6 n   (CPR / DSR-6, Cursor Position Report) ----------
+                // Parses as `Cursor::RequestActivePositionReport`. The reply
+                // must be built as the struct variant `ActivePositionReport`
+                // (NOT `Cursor::Position`, which is CUP = ESC [ r;c H).
+                CSI::Cursor(Cursor::RequestActivePositionReport) => {
+                    let (row_0_idx, col_0_idx) = vt100_cursor;
+                    let response = Action::CSI(CSI::Cursor(Cursor::ActivePositionReport {
+                        line: OneBased::from_zero_based(row_0_idx as u32),
+                        col: OneBased::from_zero_based(col_0_idx as u32),
+                    }));
+                    write!(reply, "{}", response)?; // renders "\x1b[{line};{col}R"
+                }
+
+                _ => {}
+            }
+        }
+    }
+
+    if !reply.is_empty() {
+        pty_writer.write_all(&reply)?;
+        pty_writer.flush()?;
+    }
+
+    Ok(())
 }

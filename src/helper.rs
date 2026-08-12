@@ -6,7 +6,6 @@ use crate::{
     protocol::{Msg, decode, encode},
 };
 use anyhow::{Context, Result, anyhow};
-use bytes::Bytes;
 use crossterm::terminal::{enable_raw_mode, size};
 use futures::{SinkExt, StreamExt};
 use iroh::{Endpoint, PublicKey, SecretKey, endpoint::presets};
@@ -15,10 +14,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{
-    sync::mpsc,
-    time::timeout,
-};
+use tokio::{sync::mpsc, time::timeout};
 use tokio_util::codec::LengthDelimitedCodec;
 
 pub struct VictimHub {
@@ -30,8 +26,8 @@ pub struct VictimHub {
 
 impl VictimHub {
     pub async fn connect(args: ConnectArgs, statusbar_handle: StatusBarHandle) -> Result<Self> {
-        let (to_victim_tx, to_victim_rx) = mpsc::channel::<Msg>(1000);
-        let (from_victim_tx, from_victim_rx) = mpsc::channel::<Msg>(1000);
+        let (to_victim_tx, to_victim_rx) = mpsc::channel::<Msg>(64);
+        let (from_victim_tx, from_victim_rx) = mpsc::channel::<Msg>(64);
 
         let link = Link::connect(args, statusbar_handle, to_victim_rx, from_victim_tx).await?;
 
@@ -231,7 +227,8 @@ impl Link {
                     .await
                     .ok_or(anyhow!("channel closed"))
                     .context("Helper to victim")?;
-                raw_writer.send(Bytes::from(encode(&msg)?)).await?;
+
+                raw_writer.send(encode(&msg)?).await?;
             }
 
             #[allow(unreachable_code)]
