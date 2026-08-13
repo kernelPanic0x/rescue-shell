@@ -2,6 +2,8 @@
 name = "rescue-shell"
 version = "0.1.0"
 edition = "2024"
+description = "A remote rescue shell that runs everywhere, all at once."
+authors = ["Elias Dalbeck <eliasdalbeck42@gmail.com>"]
 
 [workspace]
 members = ["wormhole-cli"]
