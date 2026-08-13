@@ -1,0 +1,1363 @@
+#![expect(clippy::too_many_arguments)]
+mod completer;
+mod util;
+
+use std::{
+    io::IsTerminal,
+    pin::Pin,
+    sync::{LazyLock, atomic::AtomicBool},
+    time::{Duration, Instant},
+};
+
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use color_eyre::{
+    eyre::{self, Context},
+    owo_colors::OwoColorize,
+};
+use completer::enter_code;
+use console::{Term, style};
+use futures::{Future, future::Either};
+use indicatif::{MultiProgress, ProgressBar};
+use magic_wormhole::{
+    MailboxConnection, ParseCodeError, ParsePasswordError, Wormhole, forwarding, transfer,
+    transit::{self, ConnectionType, TransitInfo},
+};
+use std::{io::Write, path::PathBuf};
+use tracing_subscriber::EnvFilter;
+
+#[cfg(feature = "clipboard")]
+use arboard::Clipboard;
+
+/// This returns a future which will fire once Ctrl+C is pressed.
+///
+/// The first Ctrl+C press handles the event gracefully. Pressing it a second time will abort the process immediately.
+fn ctrlc_handler() -> Pin<Box<impl Future<Output = ()> + 'static>> {
+    static HAS_NOTIFIED: AtomicBool = AtomicBool::new(false);
+
+    /* Register the handler lazily when requested for the first time */
+    static RECEIVER: LazyLock<async_channel::Receiver<()>> = LazyLock::new(|| {
+        let (s, ctrl_c) = async_channel::unbounded();
+
+        let handler = move || {
+            smol::block_on(async {
+                if HAS_NOTIFIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    /* Second signal. Exit */
+                    tracing::debug!("Exiting immediately due to Ctrl+C double press");
+                    std::process::exit(130);
+                } else {
+                    /* First signal. */
+                    tracing::info!("Got Ctrl-C event. Press again to exit immediately");
+                    s.try_send(()).ok();
+                }
+            })
+        };
+
+        ctrlc::set_handler(handler).expect("Error setting Ctrl-C handler");
+        ctrl_c
+    });
+
+    Box::pin(async {
+        RECEIVER
+            .clone()
+            .recv()
+            .await
+            .expect("Ctrl+C channel is closed");
+        tracing::debug!("Ctrl+C pressed!");
+    })
+}
+
+// send, send-many
+#[derive(Debug, Args)]
+struct CommonSenderArgs {
+    /// Suggest a different name to the receiver to keep the file's actual name secret.
+    /// Not allowed when sending more than one file.
+    #[arg(long = "rename", visible_alias = "name", value_name = "FILE_NAME")]
+    file_name: Option<String>,
+    #[arg(
+        index = 1,
+        required = true,
+        num_args = 1..,
+        value_name = "FILENAME|DIRNAME",
+        value_hint = clap::ValueHint::AnyPath,
+    )]
+    files: Vec<PathBuf>,
+}
+
+// send, send-many, serve
+#[derive(Debug, Args)]
+struct CommonLeaderArgs {
+    /// Enter a code instead of generating one automatically
+    #[arg(long, value_name = "CODE")]
+    code: Option<String>,
+    /// Length of code (in bytes/words)
+    #[arg(short = 'c', long, value_name = "NUMWORDS", default_value = "2")]
+    code_length: usize,
+    /// Suppress QR code generation from send link
+    #[arg(long)]
+    no_qr: bool,
+}
+
+// receive
+#[derive(Debug, Args)]
+struct CommonReceiverArgs {
+    /// Store transferred file or folder in the specified directory. Defaults to $PWD.
+    #[arg(long = "out-dir", value_name = "PATH", default_value = ".", value_hint = clap::ValueHint::DirPath)]
+    file_path: PathBuf,
+}
+
+// receive, connect
+#[derive(Debug, Args)]
+struct CommonFollowerArgs {
+    /// Provide the code now rather than typing it interactively
+    #[arg(value_name = "CODE")]
+    code: Option<String>,
+}
+
+// send, send-mane, receive, serve, connect
+#[derive(Debug, Clone, Args)]
+struct CommonArgs {
+    /// Use a custom relay server (specify multiple times for multiple relays)
+    #[arg(
+        long,
+        visible_alias = "relay",
+        action = clap::ArgAction::Append,
+        value_name = "tcp://HOSTNAME:PORT",
+        value_hint = clap::ValueHint::Url,
+        env = "WORMHOLE_RELAY_URL",
+    )]
+    relay_server: Vec<url::Url>,
+    /// Use a custom rendezvous server. Both sides need to use the same value in order to find each other.
+    #[arg(long, value_name = "ws://example.org", value_hint = clap::ValueHint::Url, env = "WORMHOLE_MAILBOX_URL")]
+    rendezvous_server: Option<url::Url>,
+    /// Disable the relay server support and force a direct connection.
+    #[arg(long)]
+    force_direct: bool,
+    /// Always route traffic over a relay server. This hides your IP address from the peer (but not from the server operators. Use Tor for that).
+    #[arg(long, conflicts_with = "force_direct")]
+    force_relay: bool,
+}
+
+#[derive(Debug, Subcommand)]
+#[command(arg_required_else_help = true)]
+enum ForwardCommand {
+    /// Make the following ports of your system available to your peer
+    #[command(
+        visible_alias = "open",
+        alias = "server", /* Muscle memory <3 */
+    )]
+    Serve {
+        /// List of ports to open up. You can optionally specify a domain/address to forward remote ports
+        #[arg(value_name = "[DOMAIN:]PORT", required = true, action = clap::ArgAction::Append, value_hint = clap::ValueHint::Hostname)]
+        targets: Vec<String>,
+        #[command(flatten)]
+        common: CommonArgs,
+        #[command(flatten)]
+        common_leader: CommonLeaderArgs,
+    },
+    /// Connect to some ports forwarded to you
+    #[command()]
+    Connect {
+        /// Bind to specific ports instead of taking random free high ports. Can be provided multiple times.
+        #[arg(
+            short = 'p',
+            long = "port",
+            action = clap::ArgAction::Append,
+            value_name = "PORT"
+        )]
+        ports: Vec<u16>,
+        /// Bind to a specific address to accept the forwarding. Depending on your system and firewall, this may make the forwarded ports accessible from the outside.
+        #[arg(long = "bind", value_name = "ADDRESS", default_value = "::", value_hint = clap::ValueHint::Other)]
+        bind_address: std::net::IpAddr,
+        /// Accept the forwarding without asking for confirmation
+        #[arg(long, visible_alias = "yes")]
+        noconfirm: bool,
+        #[command(flatten)]
+        common: CommonArgs,
+        #[command(flatten)]
+        common_follower: CommonFollowerArgs,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WormholeCommand {
+    /// Send a file or a folder
+    #[command(visible_alias = "tx")]
+    Send {
+        #[clap(flatten)]
+        common: CommonArgs,
+        #[clap(flatten)]
+        common_leader: CommonLeaderArgs,
+        #[clap(flatten)]
+        common_send: CommonSenderArgs,
+    },
+    /// Receive a file or a folder
+    #[command(visible_alias = "rx")]
+    Receive {
+        /// Accept file transfer without asking for confirmation
+        #[arg(long, visible_alias = "yes")]
+        noconfirm: bool,
+        #[command(flatten)]
+        common: CommonArgs,
+        #[command(flatten)]
+        common_follower: CommonFollowerArgs,
+        #[command(flatten)]
+        common_receiver: CommonReceiverArgs,
+    },
+    /// Send a file to many recipients
+    #[command(
+        after_help = "This works by sending the file in a loop with the same code over \
+        and over again. Note that this also gives an attacker multiple tries \
+        to guess the code, whereas normally they have only one. This can be \
+        countered by using a longer than usual code (default 4 bytes entropy).\n\n\
+        The application terminates on interruption, after a timeout or after a
+        number of sent files, whichever comes first. It will always try to send
+        at least one file, regardless of the limits."
+    )]
+    SendMany {
+        /// Only send the file up to n times, limiting the number of people that may receive it.
+        /// These are also the number of tries a potential attacker gets at guessing the password.
+        #[arg(short = 'n', long, value_name = "N", default_value = "30")]
+        tries: u64,
+        /// Automatically stop providing the file after a certain amount of time.
+        #[arg(long, value_name = "MINUTES", default_value = "60")]
+        timeout: u64,
+        #[command(flatten)]
+        common: CommonArgs,
+        #[command(flatten)]
+        common_leader: CommonLeaderArgs,
+        #[command(flatten)]
+        common_send: CommonSenderArgs,
+    },
+    /// Forward ports from one machine to another
+    #[command(subcommand)]
+    Forward(ForwardCommand),
+    /// Generate shell completions for the wormhole CLI
+    #[command(hide = true)]
+    Completion {
+        /// The shell type to generate completions for (bash, elvish, powershell, zsh)
+        shell: clap_complete::Shell,
+    },
+    #[command(hide = true)]
+    Help,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    version = "0.8.1",
+    author,
+    about,
+    name = "wormhole-rs",
+    arg_required_else_help = true,
+    disable_help_subcommand = true,
+    propagate_version = true,
+    after_help = "Run a subcommand with `--help` to know how it's used."
+)]
+struct WormholeCli {
+    /// Enable logging to stdout, for debugging purposes
+    #[arg(
+        short = 'v',
+        long = "verbose",
+        alias = "log",
+        global = true,
+        display_order = 100
+    )]
+    log: bool,
+
+    #[clap(subcommand)]
+    command: WormholeCommand,
+
+    /// Disable color output
+    #[arg(
+        long = "no-color",
+        global = true,
+        help = "Disable color output",
+        display_order = 101
+    )]
+    no_color: bool,
+}
+
+/// Behaves like the `wormhole-rs` binary. `args` are the arguments after
+/// `rescue-shell wormhole`. Returns a process exit code instead of exiting.
+pub async fn run_from<I, S>(args: I) -> i32
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString>,
+{
+    let _ = color_eyre::install(); // ignore "already installed"
+
+    let argv: Vec<std::ffi::OsString> = std::iter::once(std::ffi::OsString::from("wormhole-rs"))
+        .chain(args.into_iter().map(Into::into))
+        .collect();
+
+    match async_main(argv).await {
+        Ok(code) => code,
+        Err(report) => {
+            eprintln!("{report:?}");
+            1
+        }
+    }
+}
+
+#[cfg_attr(
+    feature = "tls",
+    deprecated(
+        note = "The 'tls' feature depends on the async-tls crate which in turn depends on an old unmaintained version of rustls. If you need websocket TLS support use one of the futures-rustls features."
+    )
+)]
+async fn async_main(argv: Vec<std::ffi::OsString>) -> eyre::Result<i32> {
+    let app = match WormholeCli::try_parse_from(argv) {
+        Ok(app) => app,
+        Err(err) => {
+            // --help/--version print to stdout (code 0), usage errors to stderr (code 2)
+            err.print()?;
+            return Ok(err.exit_code());
+        }
+    };
+
+    let mut term = Term::stdout();
+
+    // Set NO_COLOR environment variable if --no-color flag is used
+    if app.no_color {
+        unsafe { std::env::set_var("NO_COLOR", "1") };
+    }
+
+    if app.log {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_env_filter(EnvFilter::new(
+                "wormhole_rs=debug,magic_wormhole::core=trace,mio=debug,ws=error",
+            ))
+            .with_target(false)
+            .init();
+        tracing::trace!("Logging enabled.");
+    } else {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_env_filter(EnvFilter::new("mio=debug"))
+            .with_target(false)
+            .init();
+    };
+
+    match app.command {
+        WormholeCommand::Send {
+            common,
+            common_leader:
+                CommonLeaderArgs {
+                    code,
+                    code_length,
+                    no_qr,
+                },
+            common_send: CommonSenderArgs { file_name, files },
+            ..
+        } => {
+            let offer = make_send_offer(files, file_name).await?;
+
+            let transit_abilities = parse_transit_args(&common);
+            let (wormhole, _code, relay_hints) = match util::cancellable(
+                Box::pin(parse_and_connect(
+                    &mut term,
+                    common,
+                    code,
+                    Some(code_length),
+                    no_qr,
+                    true,
+                    transfer::APP_CONFIG,
+                    Some(&sender_print_code),
+                )),
+                ctrlc_handler(),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => return Ok(0),
+            };
+
+            Box::pin(send(wormhole, relay_hints, offer, transit_abilities)).await?;
+        }
+        WormholeCommand::SendMany {
+            tries,
+            timeout,
+            common,
+            common_leader:
+                CommonLeaderArgs {
+                    code,
+                    code_length,
+                    no_qr,
+                },
+            common_send: CommonSenderArgs { file_name, files },
+            ..
+        } => {
+            let transit_abilities = parse_transit_args(&common);
+            let (wormhole, code, relay_hints) = {
+                let connect_fut = Box::pin(parse_and_connect(
+                    &mut term,
+                    common,
+                    code,
+                    Some(code_length),
+                    no_qr,
+                    true,
+                    transfer::APP_CONFIG,
+                    Some(&sender_print_code),
+                ));
+                match futures::future::select(connect_fut, ctrlc_handler()).await {
+                    Either::Left((result, _)) => result?,
+                    Either::Right(((), _)) => return Ok(0),
+                }
+            };
+            let timeout = Duration::from_secs(timeout * 60);
+
+            Box::pin(send_many(
+                relay_hints,
+                &code,
+                files,
+                file_name,
+                tries,
+                timeout,
+                wormhole,
+                &mut term,
+                transit_abilities,
+            ))
+            .await?;
+        }
+        WormholeCommand::Receive {
+            noconfirm,
+            common,
+            common_follower: CommonFollowerArgs { code },
+            common_receiver: CommonReceiverArgs { file_path },
+            ..
+        } => {
+            let transit_abilities = parse_transit_args(&common);
+            let (wormhole, _code, relay_hints) = {
+                let connect_fut = Box::pin(parse_and_connect(
+                    &mut term,
+                    common,
+                    code,
+                    None,
+                    false,
+                    false,
+                    transfer::APP_CONFIG,
+                    None,
+                ));
+                match futures::future::select(connect_fut, ctrlc_handler()).await {
+                    Either::Left((result, _)) => result?,
+                    Either::Right(((), _)) => return Ok(0),
+                }
+            };
+
+            Box::pin(receive(
+                wormhole,
+                relay_hints,
+                &file_path,
+                noconfirm,
+                transit_abilities,
+            ))
+            .await?;
+        }
+        WormholeCommand::Forward(ForwardCommand::Serve {
+            targets,
+            common,
+            common_leader:
+                CommonLeaderArgs {
+                    code,
+                    code_length,
+                    no_qr,
+                },
+            ..
+        }) => {
+            // TODO make fancy
+            tracing::warn!(
+                "This is an unstable feature. Make sure that your peer is running the exact same version of the program as you. Also, please report all bugs and crashes."
+            );
+            /* Map the CLI argument to Strings. Use the occasion to inspect them and fail early on malformed input. */
+            let targets = targets
+                .into_iter()
+                .enumerate()
+                .map(|(index, target)| {
+                    let result = (|| {
+                        /* Either HOST:PORT or PORT */
+                        match target.rsplit_once(':') {
+                            Some((host, port)) => {
+                                let host = url::Host::parse(host)
+                                    .map_err(eyre::Error::from)
+                                    .context("Invalid host")?;
+                                let port: u16 = port.parse().context("Invalid port")?;
+                                Ok((Some(host), port))
+                            }
+                            None => {
+                                /* It's just a port */
+                                target
+                                    .parse::<u16>()
+                                    .map(|port| (None, port))
+                                    .map_err(eyre::Error::from)
+                                    .context("Invalid port")
+                            }
+                        }
+                    })();
+                    result.context(format!(
+                        "Invalid {}{} target argument ('{}') ",
+                        index + 1,
+                        match (index + 1) % 10 {
+                            1 => "st",
+                            2 => "nd",
+                            3 => "rd",
+                            _ => "th",
+                        },
+                        target
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            loop {
+                let mut app_config = forwarding::APP_CONFIG;
+                app_config.app_version.transit_abilities = parse_transit_args(&common);
+                let connect_fut = Box::pin(parse_and_connect(
+                    &mut term,
+                    common.clone(),
+                    code.clone(),
+                    Some(code_length),
+                    no_qr,
+                    true,
+                    app_config,
+                    Some(&server_print_code),
+                ));
+                let (wormhole, _code, relay_hints) =
+                    match futures::future::select(connect_fut, ctrlc_handler()).await {
+                        Either::Left((result, _)) => result?,
+                        Either::Right(((), _)) => break,
+                    };
+                smol::spawn(forwarding::serve(
+                    wormhole,
+                    &transit_handler,
+                    relay_hints,
+                    targets.clone(),
+                    ctrlc_handler(),
+                ))
+                .detach();
+            }
+        }
+        WormholeCommand::Forward(ForwardCommand::Connect {
+            ports,
+            noconfirm,
+            bind_address,
+            common,
+            common_follower: CommonFollowerArgs { code },
+            ..
+        }) => {
+            // TODO make fancy
+            tracing::warn!(
+                "This is an unstable feature. Make sure that your peer is running the exact same version of the program as you. Also, please report all bugs and crashes."
+            );
+            let mut app_config = forwarding::APP_CONFIG;
+            app_config.app_version.transit_abilities = parse_transit_args(&common);
+            let (wormhole, _code, relay_hints) = parse_and_connect(
+                &mut term, common, code, None, false, false, app_config, None,
+            )
+            .await?;
+
+            let offer = forwarding::connect(
+                wormhole,
+                &transit_handler,
+                relay_hints,
+                Some(bind_address),
+                &ports,
+            )
+            .await?;
+            tracing::info!("Mapping the following open ports to targets:");
+            tracing::info!("  local port -> remote target (no address = localhost on remote)");
+            for (port, target) in &offer.mapping {
+                tracing::info!("  {} -> {}", port, target);
+            }
+            if noconfirm || util::ask_user("Accept forwarded ports?", true).await {
+                offer.accept(ctrlc_handler()).await?;
+            } else {
+                offer.reject().await?;
+            }
+        }
+        WormholeCommand::Completion { shell } => {
+            let mut cmd = WormholeCli::command();
+            let binary_name = "wormhole-rs";
+
+            match shell {
+                shell @ clap_complete::Shell::Zsh => {
+                    // for zsh, we will wrap the output to make it easier to use
+                    // this way we can source it directly `source <(wormhole-rs completion zsh)`
+
+                    let mut out = Vec::new();
+                    clap_complete::generate(shell, &mut cmd, binary_name, &mut out);
+                    let out = String::from_utf8(out)
+                        .expect("Internal error: shell completion not UTF-8 encoded");
+                    #[allow(clippy::uninlined_format_args)]
+                    let out = format!(
+                        "compdef _{binary_name} {binary_name}\n _{binary_name}() {{ {out} }}\n\nif [ \"$funcstack[1]\" = \"{binary_name}\" ]; then\n   {binary_name} \"$@\"\nfi",
+                    );
+
+                    std::io::stdout().write_all(out.as_bytes())?;
+                }
+                shell => {
+                    let mut out = std::io::stdout();
+                    clap_complete::generate(shell, &mut cmd, binary_name, &mut out);
+                }
+            }
+        }
+        WormholeCommand::Help => {
+            println!("Use --help to get help");
+            std::process::exit(2);
+        }
+    }
+
+    Ok(0)
+}
+
+fn parse_transit_args(args: &CommonArgs) -> transit::Abilities {
+    match (args.force_direct, args.force_relay) {
+        (false, false) => transit::Abilities::ALL,
+        (true, false) => transit::Abilities::FORCE_DIRECT,
+        (false, true) => transit::Abilities::FORCE_RELAY,
+        (true, true) => unreachable!("These flags are mutually exclusive"),
+    }
+}
+
+type PrintCodeFn =
+    dyn Fn(&mut Term, &magic_wormhole::Code, &Option<url::Url>, bool) -> eyre::Result<()>;
+
+/**
+ * Parse the necessary command line arguments to establish an initial server connection.
+ * This is used over and over again by the different subcommands.
+ *
+ * If this `is_send` and the code is not specified via the CLI, then a code will be allocated.
+ * Otherwise, the user will be prompted interactively to enter it.
+ */
+async fn parse_and_connect(
+    term: &mut Term,
+    common_args: CommonArgs,
+    mut code: Option<String>,
+    code_length: Option<usize>,
+    no_qr: bool,
+    is_send: bool,
+    mut app_config: magic_wormhole::AppConfig<impl serde::Serialize + Send + Sync + 'static>,
+    print_code: Option<&PrintCodeFn>,
+) -> eyre::Result<(Wormhole, magic_wormhole::Code, Vec<transit::RelayHint>)> {
+    // TODO handle relay servers with multiple endpoints better
+    let mut relay_hints: Vec<transit::RelayHint> = common_args
+        .relay_server
+        .into_iter()
+        .map(|url| transit::RelayHint::from_urls(url.host_str().map(str::to_owned), [url]))
+        .collect::<Result<_, transit::RelayHintParseError>>()?;
+    if relay_hints.is_empty() {
+        relay_hints.push(transit::RelayHint::from_urls(
+            None,
+            [magic_wormhole::transit::DEFAULT_RELAY_SERVER
+                .parse()
+                .unwrap()],
+        )?)
+    }
+
+    if code.is_none() && !is_send {
+        code = Some(enter_code()?)
+    }
+
+    // TODO: Apply this change to all usages after an API break
+    // https://github.com/magic-wormhole/magic-wormhole.rs/issues/193
+    // We accept a little breakage in non-interactive use, because this is a security issue
+    // Split the nameplate parsing from the code parsing to ensure we allow non-integer nameplates
+    // until the next breaking release
+    let res: Option<Result<magic_wormhole::Code, _>> = code.as_ref().map(|c| c.parse());
+    let code: Option<magic_wormhole::Code> = match res {
+        Some(Ok(code)) => Some(code),
+        // Check if an interactive terminal is connected
+        Some(Err(
+            err @ (ParseCodeError::SeparatorMissing
+            | ParseCodeError::Password(ParsePasswordError::TooShort { .. })),
+        )) => {
+            // Only fail for the case where the password is < 4 characters.
+            // Anything else will just print an error for now.
+            return Err(err.into());
+        }
+        // If we have an interactive terminal connected, also fail for low entropy
+        Some(Err(err @ ParseCodeError::Password(ParsePasswordError::LittleEntropy { .. })))
+            if std::io::stdin().is_terminal() =>
+        {
+            return Err(err.into());
+        }
+        Some(Err(err)) => {
+            tracing::error!("{} This will fail in the next release.", err);
+            code.map(|c| {
+                let (nameplate, password) = c.split_once("-").unwrap();
+                unsafe {
+                    magic_wormhole::Code::from_components(
+                        magic_wormhole::Nameplate::new_unchecked(nameplate),
+                        magic_wormhole::Password::new_unchecked(password),
+                    )
+                }
+            })
+        }
+        None => None,
+    };
+
+    /* We need to track that information for when we generate a QR code */
+    let mut uri_rendezvous = None;
+    if let Some(rendezvous_server) = common_args.rendezvous_server {
+        uri_rendezvous = Some(rendezvous_server.clone());
+        app_config = app_config.rendezvous_url(rendezvous_server.to_string().into());
+    }
+    let mailbox_connection = match code {
+        Some(code) => {
+            if is_send {
+                print_code.expect("`print_code` must be `Some` when `is_send` is `true`")(
+                    term,
+                    &code,
+                    &uri_rendezvous,
+                    no_qr,
+                )?;
+            }
+            MailboxConnection::connect(app_config, code, true).await?
+        }
+        None => {
+            let mailbox_connection =
+                MailboxConnection::create(app_config, code_length.unwrap()).await?;
+
+            /* Print code and also copy it to clipboard */
+            if is_send {
+                #[cfg(feature = "clipboard")]
+                {
+                    let clipboard = Clipboard::new()
+                        .map_err(|err| {
+                            tracing::warn!("Failed to initialize clipboard support: {}", err);
+                        })
+                        .ok();
+
+                    if let Some(mut clipboard) = clipboard {
+                        match clipboard.set_text(mailbox_connection.code().to_string()) {
+                            Ok(()) => tracing::info!("Code copied to clipboard"),
+                            Err(err) => tracing::warn!("Failed to copy code to clipboard: {}", err),
+                        }
+                    }
+                }
+
+                print_code.expect("`print_code` must be `Some` when `is_send` is `true`")(
+                    term,
+                    mailbox_connection.code(),
+                    &uri_rendezvous,
+                    no_qr,
+                )?;
+            }
+            mailbox_connection
+        }
+    };
+    print_welcome(term, mailbox_connection.welcome())?;
+    let code = mailbox_connection.code().clone();
+    let wormhole = Wormhole::connect(mailbox_connection).await?;
+    eyre::Result::<_>::Ok((wormhole, code, relay_hints))
+}
+
+async fn make_send_offer(
+    mut files: Vec<PathBuf>,
+    file_name: Option<String>,
+) -> eyre::Result<transfer::offer::OfferSend> {
+    for file in &files {
+        let path = std::path::PathBuf::from(file);
+        eyre::ensure!(
+            smol::unblock(move || path.exists()).await,
+            "{} does not exist",
+            file.display()
+        );
+    }
+    tracing::trace!("Making send offer in {files:?}, with name {file_name:?}");
+
+    match (files.len(), file_name) {
+        (0, _) => unreachable!("Already checked by CLI parser"),
+        (1, Some(file_name)) => {
+            let file = files.remove(0);
+            Ok(transfer::offer::OfferSend::new_file_or_folder(file_name, file).await?)
+        }
+        (1, None) => {
+            let file = files.remove(0);
+            let file_name = file
+                .file_name()
+                .ok_or_else(|| {
+                    eyre::format_err!("You can't send a file without a name. Maybe try --rename")
+                })?
+                .to_str()
+                .ok_or_else(|| eyre::format_err!("File path must be a valid UTF-8 string"))?
+                .to_owned();
+            Ok(transfer::offer::OfferSend::new_file_or_folder(file_name, file).await?)
+        }
+        (_, Some(_)) => Err(eyre::format_err!(
+            "Can't customize file name when sending multiple files"
+        )),
+        (_, None) => {
+            let mut names = std::collections::BTreeMap::new();
+            for path in &files {
+                eyre::ensure!(
+                    path.file_name().is_some(),
+                    "'{}' has no name. You need to send it separately and use the --rename flag, or rename it on the file system",
+                    path.display()
+                );
+                if let Some(old) = names.insert(path.file_name(), path) {
+                    eyre::bail!(
+                        "'{}' and '{}' have the same file name. Rename one of them on disk, or send them in separate transfers",
+                        old.display(),
+                        path.display(),
+                    );
+                }
+            }
+            Ok(transfer::offer::OfferSend::new_paths(files).await?)
+        }
+    }
+}
+
+fn create_progress_bar(file_size: u64) -> ProgressBar {
+    use indicatif::ProgressStyle;
+
+    let template = if should_use_color() {
+        "[{elapsed_precise:.yellow.bold}] [{wide_bar}] {bytes:.blue.bold}/{total_bytes:.blue.bold} | {decimal_bytes_per_sec:.green.bold} | ETA: {eta:.yellow.bold}"
+    } else {
+        "[{elapsed_precise}] [{wide_bar}] {bytes}/{total_bytes} | {decimal_bytes_per_sec} | ETA: {eta}"
+    };
+
+    let pb = ProgressBar::new(file_size);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(template)
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+    pb
+}
+
+fn create_progress_handler(pb: ProgressBar) -> impl FnMut(u64, u64) {
+    move |sent, total| {
+        if sent == 0 {
+            pb.reset_elapsed();
+            pb.set_length(total);
+            pb.enable_steady_tick(std::time::Duration::from_millis(250));
+        }
+
+        pb.set_position(sent);
+    }
+}
+
+fn print_welcome(term: &mut Term, welcome: Option<&str>) -> eyre::Result<()> {
+    if let Some(welcome) = &welcome {
+        writeln!(term, "Got welcome from server: {welcome}")?;
+    }
+    Ok(())
+}
+
+// For file transfer
+fn sender_print_code(
+    term: &mut Term,
+    code: &magic_wormhole::Code,
+    rendezvous_server: &Option<url::Url>,
+    no_qr: bool,
+) -> eyre::Result<()> {
+    let uri = magic_wormhole::uri::WormholeTransferUri {
+        code: code.clone(),
+        rendezvous_server: rendezvous_server.clone(),
+        is_leader: false,
+    }
+    .to_string();
+
+    if cfg!(feature = "clipboard") {
+        writeln!(
+            term,
+            "\nThis wormhole's code is: {} (it has been copied to your clipboard)",
+            style(&code).bold()
+        )?;
+    } else {
+        writeln!(term, "\nThis wormhole's code is: {}", style(&code).bold())?;
+    }
+
+    writeln!(
+        term,
+        "This is equivalent to the following link: \u{001B}]8;;{}\u{001B}\\{}\u{001B}]8;;\u{001B}\\",
+        &uri, &uri
+    )?;
+    if no_qr {
+        tracing::debug!("QR option not enabled. Skipping QR code generation.");
+    } else {
+        let qr_code = qr2term::generate_qr_string(&uri)
+            .context("Failed to generate QR code for send link")?;
+        writeln!(term, "{qr_code}")?;
+    }
+
+    writeln!(
+        term,
+        "On the other side, open the link or enter that code into a Magic Wormhole client."
+    )?;
+    writeln!(
+        term,
+        "For example: {} {}\n",
+        style("wormhole-rs receive").bold(),
+        style(&code).bold()
+    )?;
+    Ok(())
+}
+
+// For port forwarding
+fn server_print_code(
+    term: &mut Term,
+    code: &magic_wormhole::Code,
+    _: &Option<url::Url>,
+    _qr: bool,
+) -> eyre::Result<()> {
+    if cfg!(feature = "clipboard") {
+        writeln!(
+            term,
+            "\nThis wormhole's code is: {} (it has been copied to your clipboard)",
+            style(&code).bold()
+        )?;
+    } else {
+        writeln!(term, "\nThis wormhole's code is: {}", style(&code).bold())?;
+    }
+
+    writeln!(
+        term,
+        "On the other side, enter that code into a Magic Wormhole client\n"
+    )?;
+    writeln!(
+        term,
+        "For example: {} {}\n",
+        style("wormhole-rs forward connect").bold(),
+        style(&code).bold()
+    )?;
+    Ok(())
+}
+
+async fn send(
+    wormhole: Wormhole,
+    relay_hints: Vec<transit::RelayHint>,
+    offer: transfer::offer::OfferSend,
+    transit_abilities: transit::Abilities,
+) -> eyre::Result<()> {
+    let pb = create_progress_bar(0);
+    let pb2 = pb.clone();
+    transfer::send(
+        wormhole,
+        relay_hints,
+        transit_abilities,
+        offer,
+        &transit_handler,
+        create_progress_handler(pb),
+        ctrlc_handler(),
+    )
+    .await
+    .context("Send process failed")?;
+    pb2.finish();
+    Ok(())
+}
+
+async fn send_many(
+    relay_hints: Vec<transit::RelayHint>,
+    code: &magic_wormhole::Code,
+    files: Vec<PathBuf>,
+    file_name: Option<String>,
+    max_tries: u64,
+    timeout: Duration,
+    wormhole: Wormhole,
+    term: &mut Term,
+    transit_abilities: transit::Abilities,
+) -> eyre::Result<()> {
+    tracing::warn!(
+        "Reminder that you are sending the file to multiple people, and this may reduce the overall security. See the help page for more information."
+    );
+
+    /* Progress bar is commented out for now. See the issues about threading/async in
+     * the Indicatif repository for more information. Multiple progress bars are not usable
+     * for us at the moment, so we'll have to do without for now.
+     */
+    let mp = MultiProgress::new();
+    let time = Instant::now();
+
+    /* Special-case the first send with reusing the existing connection */
+    send_in_background(
+        relay_hints.clone(),
+        make_send_offer(files.clone(), file_name.clone()).await?,
+        wormhole,
+        term.clone(),
+        &mp,
+        transit_abilities,
+        ctrlc_handler(),
+    )
+    .await?;
+
+    for tries in 0.. {
+        if time.elapsed() >= timeout {
+            tracing::info!(
+                "{:?} have elapsed, we won't accept any new connections now.",
+                timeout
+            );
+            break;
+        }
+        if tries > max_tries {
+            tracing::info!("Max number of tries reached, we won't accept any new connections now.");
+            break;
+        }
+
+        let wormhole = Wormhole::connect(
+            MailboxConnection::connect(transfer::APP_CONFIG, code.clone(), false).await?,
+        )
+        .await?;
+
+        send_in_background(
+            relay_hints.clone(),
+            make_send_offer(files.clone(), file_name.clone()).await?,
+            wormhole,
+            term.clone(),
+            &mp,
+            transit_abilities,
+            ctrlc_handler(),
+        )
+        .await?;
+    }
+
+    async fn send_in_background(
+        relay_hints: Vec<transit::RelayHint>,
+        offer: transfer::offer::OfferSend,
+        wormhole: Wormhole,
+        mut term: Term,
+        mp: &MultiProgress,
+        transit_abilities: transit::Abilities,
+        cancel: impl Future<Output = ()> + Send + 'static,
+    ) -> eyre::Result<()> {
+        writeln!(&mut term, "Sending file to peer").unwrap();
+        let pb = create_progress_bar(0);
+        let pb = mp.add(pb);
+        smol::spawn(async move {
+            let pb2 = pb.clone();
+            let result = async move {
+                transfer::send(
+                    wormhole,
+                    relay_hints,
+                    transit_abilities,
+                    offer,
+                    &transit_handler,
+                    create_progress_handler(pb2),
+                    cancel,
+                )
+                .await?;
+                eyre::Result::<_>::Ok(())
+            };
+            match result.await {
+                Ok(_) => {
+                    pb.finish();
+                    tracing::info!("Successfully sent file to someone");
+                }
+                Err(e) => {
+                    pb.abandon();
+                    tracing::error!("Send failed, {}", e);
+                }
+            };
+        })
+        .detach();
+        Ok(())
+    }
+
+    Ok(())
+}
+
+async fn receive(
+    wormhole: Wormhole,
+    relay_hints: Vec<transit::RelayHint>,
+    target_dir: &std::path::Path,
+    noconfirm: bool,
+    transit_abilities: transit::Abilities,
+) -> eyre::Result<()> {
+    #[cfg(not(feature = "experimental-transfer-v2"))]
+    {
+        let req = transfer::request_file(wormhole, relay_hints, transit_abilities, ctrlc_handler())
+            .await
+            .context("Could not get an offer")?;
+        /* If None, the task got cancelled */
+        if let Some(req) = req {
+            receive_inner_v1(req, target_dir, noconfirm).await
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(feature = "experimental-transfer-v2")]
+    {
+        let req = transfer::request(wormhole, relay_hints, transit_abilities, ctrlc_handler())
+            .await
+            .context("Could not get an offer")?;
+
+        match req {
+            Some(transfer::ReceiveRequest::V1(req)) => {
+                receive_inner_v1(req, target_dir, noconfirm).await
+            }
+            #[cfg(feature = "experimental-transfer-v2")]
+            Some(transfer::ReceiveRequest::V2(req)) => {
+                receive_inner_v2(req, target_dir, noconfirm).await
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+async fn receive_inner_v1(
+    req: transfer::ReceiveRequestV1,
+    target_dir: &std::path::Path,
+    noconfirm: bool,
+) -> eyre::Result<()> {
+    use smol::fs::OpenOptions;
+
+    /*
+     * Control flow is a bit tricky here:
+     * - First of all, we ask if we want to receive the file at all
+     * - Then, we check if the file already exists
+     * - If it exists, ask whether to overwrite and act accordingly
+     * - If it doesn't, directly accept, but DON'T overwrite any files
+     */
+
+    use unit_prefix::NumberPrefix;
+    if !(noconfirm
+        || util::ask_user(
+            match should_use_color() {
+                true => format!(
+                    "Receive file '{}' ({})?",
+                    req.file_name().green().bold(),
+                    match NumberPrefix::binary(req.file_size() as f64) {
+                        NumberPrefix::Standalone(bytes) => format!("{bytes} bytes"),
+                        NumberPrefix::Prefixed(prefix, n) =>
+                            format!("{:.1} {}B", n, prefix.symbol()),
+                    }
+                    .blue()
+                    .bold(),
+                ),
+                false => format!(
+                    "Receive file '{}' ({})?",
+                    req.file_name(),
+                    match NumberPrefix::binary(req.file_size() as f64) {
+                        NumberPrefix::Standalone(bytes) => format!("{bytes} bytes"),
+                        NumberPrefix::Prefixed(prefix, n) =>
+                            format!("{:.1} {}B", n, prefix.symbol()),
+                    },
+                ),
+            },
+            true,
+        )
+        .await)
+    {
+        return req.reject().await.context("Could not reject offer");
+    }
+
+    // TODO validate untrusted input here
+    let file_path = std::path::Path::new(target_dir).join(req.file_name());
+
+    let pb = create_progress_bar(req.file_size());
+
+    /* Then, accept if the file exists */
+    if !file_path.exists() || noconfirm {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file_path)
+            .await
+            .context("Failed to create destination file")?;
+        return req
+            .accept(
+                &transit_handler,
+                create_progress_handler(pb),
+                &mut file,
+                ctrlc_handler(),
+            )
+            .await
+            .context("Receive process failed");
+    }
+
+    /* If there is a collision, ask whether to overwrite */
+    if !util::ask_user(
+        if should_use_color() {
+            format!(
+                "Override existing file {}?",
+                file_path.display().red().bold()
+            )
+        } else {
+            format!("Override existing file {}?", file_path.display())
+        },
+        false,
+    )
+    .await
+    {
+        return req.reject().await.context("Could not reject offer");
+    }
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&file_path)
+        .await?;
+    req.accept(
+        &transit_handler,
+        create_progress_handler(pb),
+        &mut file,
+        ctrlc_handler(),
+    )
+    .await
+    .context("Receive process failed")
+}
+
+#[cfg(feature = "experimental-transfer-v2")]
+async fn receive_inner_v2(
+    req: transfer::ReceiveRequestV2,
+    target_dir: &std::path::Path,
+    noconfirm: bool,
+) -> eyre::Result<()> {
+    let offer = req.offer();
+    let file_size = offer.total_size();
+    let offer_name = offer.offer_name();
+
+    use unit_prefix::NumberPrefix;
+    if !(noconfirm
+        || util::ask_user(
+            format!(
+                "Receive {} ({})?",
+                offer_name,
+                match NumberPrefix::binary(file_size as f64) {
+                    NumberPrefix::Standalone(bytes) => format!("{bytes} bytes"),
+                    NumberPrefix::Prefixed(prefix, n) =>
+                        format!("{:.1} {}B in size", n, prefix.symbol()),
+                },
+            ),
+            true,
+        )
+        .await)
+    {
+        return req.reject().await.context("Could not reject offer");
+    }
+
+    let pb = create_progress_bar(file_size);
+
+    let on_progress = move |received, _total| {
+        pb.set_position(received);
+    };
+
+    /* Create a temporary directory for receiving */
+    use rand::Rng;
+    let tmp_dir = target_dir.join(format!(
+        "wormhole-tmp-{:06}",
+        rand::thread_rng().gen_range(0..1_000_000)
+    ));
+    smol::fs::create_dir_all(&tmp_dir)
+        .await
+        .context("Failed to create temporary directory for receiving")?;
+
+    /* Prepare the receive by creating all directories */
+    offer.create_directories(&tmp_dir).await?;
+
+    /* Accept the offer and receive it */
+    let answer = offer.accept_all(&tmp_dir);
+    req.accept(&transit_handler, answer, on_progress, ctrlc_handler())
+        .await
+        .context("Receive process failed")?;
+
+    // /* Put in all the symlinks last, this greatly reduces the attack surface */
+    // offer.create_symlinks(&tmp_dir).await?;
+
+    /* TODO walk the output directory and delete things we did not accept; this will be important for resumption */
+
+    /* Move the received files to their target location */
+    use futures::TryStreamExt;
+    smol::fs::read_dir(&tmp_dir)
+    .await?
+    .map_err(Into::into)
+    .and_then(|file| {
+        let tmp_dir = tmp_dir.clone();
+        async move {
+            let path = file.path();
+            let name = path.file_name().expect("Internal error: this should never happen");
+            let target_path = target_dir.join(name);
+
+            /* This suffers some TOCTTOU, sorry about that: https://internals.rust-lang.org/t/rename-file-without-overriding-existing-target/17637 */
+            let path = std::path::PathBuf::from(&target_path);
+            let dest = path.clone();
+            if smol::unblock(move || dest.exists()).await {
+                eyre::bail!(
+                    "Target destination {} exists, you can manually extract the file from {}",
+                    target_path.display(),
+                    tmp_dir.display(),
+                );
+            } else {
+                smol::fs::rename(&path, &target_path).await?;
+            }
+            Ok(())
+        }})
+    .try_collect::<()>()
+    .await?;
+
+    /* Delete the temporary directory */
+    smol::fs::remove_dir_all(&tmp_dir).await.context(format!(
+        "Failed to delete {}, please do it manually",
+        tmp_dir.display()
+    ))?;
+
+    Ok(())
+}
+
+fn transit_handler(info: TransitInfo) {
+    tracing::info!("{info}");
+    let mut term = Term::stderr();
+    let use_color = should_use_color();
+
+    let conn_type = if use_color {
+        info.conn_type.bright_magenta().bold().to_string()
+    } else {
+        info.conn_type.to_string()
+    };
+
+    let peer_addr = if use_color {
+        info.peer_addr.cyan().bold().to_string()
+    } else {
+        info.peer_addr.to_string()
+    };
+
+    if info.conn_type == ConnectionType::Direct {
+        let _ = writeln!(term, "Connecting {conn_type} to {peer_addr}");
+    } else {
+        let _ = writeln!(term, "Connecting {conn_type}");
+    };
+}
+
+fn should_use_color() -> bool {
+    // Check NO_COLOR first - if it exists with any value, disable colors
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+
+    // Then check CLICOLOR_FORCE - if set and not empty/"0", enable colors regardless of terminal
+    if std::env::var_os("CLICOLOR_FORCE").is_some_and(|e| !e.is_empty() && e != "0") {
+        return true;
+    }
+
+    // Check CLICOLOR - if set and not empty/"0", use colors only when writing to a terminal
+    if std::env::var_os("CLICOLOR").is_some_and(|e| !e.is_empty() && e != "0") {
+        return std::io::stdout().is_terminal();
+    }
+
+    // Modern default (acting as if CLICOLOR is set)
+    std::io::stdout().is_terminal()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_shell_completion() {
+        use clap::ValueEnum;
+
+        for shell in clap_complete::Shell::value_variants() {
+            let mut cmd = WormholeCli::command();
+            let binary_name = "wormhole-rs";
+
+            let mut out = Vec::new();
+            clap_complete::generate(*shell, &mut cmd, binary_name, &mut out);
+            String::from_utf8(out).unwrap();
+        }
+    }
+
+    #[test]
+    fn verify_cli() {
+        WormholeCli::command().debug_assert();
+    }
+}

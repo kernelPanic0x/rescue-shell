@@ -1,0 +1,33 @@
+[package]
+name = "wormhole-cli"
+version = "0.8.1"     # tracks the upstream magic-wormhole-cli version you vendored
+edition = "2024"      # match upstream; per-crate, so your root crate can stay on 2021
+publish = false
+
+[dependencies]
+magic-wormhole = { workspace = true, features = ["forwarding"] }
+smol = "2"
+futures = "0.3"
+rand = "0.8"
+async-channel = "2"
+console = "0.16"
+indicatif = "0.18"
+dialoguer = { version = "0.12", features = ["completion"] }
+color-eyre = "0.6"
+clap = { workspace = true }
+clap_complete = "4"
+unit-prefix = "0.5"
+ctrlc = "3"
+qr2term = "0.3"
+tracing = { version = "0.1", features = ["log"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+url = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = [
+  'cfg(feature, values("clipboard"))',
+  'cfg(feature, values("tls"))',
+  'cfg(feature, values("experimental-transfer-v2"))',
+] }

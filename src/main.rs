@@ -40,6 +40,17 @@ enum Cmd {
     Connect(ConnectArgs),
     /// Copys stdin to OSC52 for remote clipboard
     Copy,
+    /// Send/receive files or forward ports (embedded wormhole-rs)
+    Wormhole {
+        /// Passed through to wormhole-rs verbatim, e.g. `rescue-shell wormhole send -c 4 file.txt`
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            hide = true,
+            value_name = "ARGS"
+        )]
+        args: Vec<std::ffi::OsString>,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -104,6 +115,13 @@ async fn main() -> anyhow::Result<()> {
             Helper::run(args).await
         }
         Cmd::Copy => copy_to_osc52(),
+        Cmd::Wormhole { args } => {
+            let code = wormhole_cli::run_from(args).await;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
     }
 }
 
