@@ -1,24 +1,22 @@
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: EUPL 1.2](https://img.shields.io/badge/License-EUPL_1.2-blue.svg)](https://opensource.org/licenses/EUPL-1.2)
 
 # 🛟 rescue-shell
 
-A **remote rescue shell** over [magic-wormhole](https://github.com/magic-wormhole/magic-wormhole) and [iroh](https://github.com/n0-computer/iroh).
+A remote rescue shell that runs everywhere, all at once.
 
-Get an end-to-end encrypted interactive PTY session between multiple machines across NATs and firewalls.
+Get a **remote rescue shell** over [magic-wormhole](https://github.com/magic-wormhole/magic-wormhole) and [iroh](https://github.com/n0-computer/iroh) for an end-to-end encrypted interactive PTY session between multiple machines across NATs and firewalls.
 
 ![Demo](demo.gif)
 
 ## Quick Start
 
-### 1. On the machine needing help (Victim)
-Run the script to host a session (defaults to `serve`):
+### 1. On the machine needing help:
 ```bash
 curl -sL run.any64.de | bash
 ```
 It will generate and display a one-time code (e.g., `7-guitar-battery`).
 
-### 2. On the machine helping (Helper)
-Run the script with the `connect` subcommand:
+### 2. On the machine helping:
 ```bash
 curl -sL run.any64.de | bash -s -- connect
 ```
@@ -28,7 +26,7 @@ Enter the code when prompted.
 
 Use `SHELL` environment variable to set a shell.
 
-It also sets `RESCUE_SHELL` environment variable to the path of the ELF in case you need the OSC52 copy functionality.
+It also sets `RESCUE_SHELL` environment variable to the path of the executable in case you need the OSC52 copy or wormhole functionality.
 
 ### CLI Commands
 
@@ -36,6 +34,7 @@ It also sets `RESCUE_SHELL` environment variable to the path of the ELF in case 
 rescue-shell serve [OPTIONS]     # Host a session (Victim)
 rescue-shell connect [OPTIONS]   # Connect to a session (Helper)
 rescue-shell copy                # Copy stdin to OSC52 for remote clipboard
+rescue-shell wormhole <args>     # full wormhole-rs cli version 0.8.1 included
 ```
 
 ## Tested platforms

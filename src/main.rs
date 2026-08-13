@@ -19,6 +19,7 @@ use crate::{helper::Helper, osc52::copy_to_osc52, victim::Victim};
 #[derive(Parser)]
 #[command(
     name = "rescue-shell",
+    author = "Elias Dalbeck",
     about = "A remote rescue shell that runs everywhere, all at once.",
     after_help = "\
 Environment Variables:
