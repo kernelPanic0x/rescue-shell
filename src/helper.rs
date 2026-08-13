@@ -1,8 +1,10 @@
 use crate::{
     ConnectArgs, app_config,
     common::{ALPN, ConnectionStateWatcher},
-    console::{LocalConsole, Role, StatusBarHandle, TermGuard, is_detach_key, render_local_screen},
-    osc_extractor::Osc52Extractor,
+    console::{
+        LocalConsole, Osc52Extractor, Role, StatusBarHandle, TermGuard, is_detach_key,
+        render_local_screen,
+    },
     protocol::{Msg, decode, encode},
 };
 use anyhow::{Context, Result, anyhow};
@@ -66,6 +68,7 @@ impl Helper {
         let mut statusbar_rx = statusbar_handle.subscribe();
 
         let console = LocalConsole::new();
+        let mut osc52_extractor = Osc52Extractor::default();
         let hub = VictimHub::connect(args, statusbar_handle.clone()).await?;
 
         // Send initial terminal dimensions to victim shell
@@ -78,8 +81,6 @@ impl Helper {
         #[cfg(unix)]
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
-
-        let mut osc_extractor = Osc52Extractor::default();
 
         let res: Result<()> = loop {
             #[cfg(unix)]
@@ -129,7 +130,7 @@ impl Helper {
                     match incoming {
                         Some(Msg::Data(bytes)) => {
                             // Isolate OSC 52 sequences and send directly to local terminal (Alacritty)
-                            let osc52_bytes = osc_extractor.extract(&bytes);
+                            let osc52_bytes = osc52_extractor.extract(&bytes);
                             if !osc52_bytes.is_empty() {
                                 console.write_stdout(osc52_bytes).await?;
                             }

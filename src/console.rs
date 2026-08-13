@@ -14,13 +14,8 @@ use crossterm::{
     terminal::{Clear, ClearType, LeaveAlternateScreen, disable_raw_mode},
 };
 use magic_wormhole::Code;
-use termwiz::escape::{
-    Action, CSI, OneBased,
-    csi::{
-        Cursor, Device,
-    },
-};
 use tokio::sync::{mpsc, watch};
+use vte::{Params, Perform};
 
 #[derive(Clone, Debug)]
 pub enum InternetState {
@@ -293,8 +288,8 @@ impl LocalConsole {
         self.stdin_rx.lock().await.recv().await
     }
 
-    pub async fn write_stdout(&self, frame: Bytes) -> anyhow::Result<()> {
-        self.stdout_tx.send(frame).await.map_err(|e| anyhow!(e))
+    pub async fn write_stdout(&self, bytes: Bytes) -> anyhow::Result<()> {
+        self.stdout_tx.send(bytes).await.map_err(|e| anyhow!(e))
     }
 
     pub async fn flush_and_close(self) {
@@ -310,11 +305,11 @@ impl LocalConsole {
 /// typed variant in termwiz (which models only the *request*), so the shell
 /// wire format is a named constant. WezTerm answers identically: Pp=1 (VT220),
 /// Pv=277 (xterm patch level -> fish enables ttymouse=sgr / 24-bit color).
-const DA2: &[u8] = b"\x1b[>1;277;0c";
+const DA2_RESP: &[u8] = b"\x1b[>1;277;0c";
 
 /// Device Status Report reply. termwiz only knows the query `5n`; the answer
 /// "ready, no malfunction" must be emitted directly.
-const DSR_OK: &[u8] = b"\x1b[0n";
+const DSR_OK_RESP: &[u8] = b"\x1b[0n";
 
 /// XTVERSION reply, a DCS sequence `ESC P >| <prog> <version> ESC \`.
 /// termwiz models `>q` as the request only; the response is the DCS body.
@@ -326,39 +321,130 @@ fn xtversion(program: &str, version: &str) -> Vec<u8> {
 /// - 62 = VT220 class, 1/9/15/22/29 = common VT220 attrs,
 /// - 52 = "supports OSC 52 clipboard writes" (new agreed extension;
 ///   read by vim 9.1.1666+, tmux, Windows Terminal, upcoming nvim).
-const DA1: &[u8] = b"\x1b[?62;1;9;15;22;29;52c";
+const DA1_RESP: &[u8] = b"\x1b[?62;1;9;15;22;29;52c";
+
+struct PtyDispatcher<'a> {
+    vt100_parser: &'a Arc<Mutex<vt100::Parser>>,
+    reply: Vec<u8>,
+}
+
+impl Perform for PtyDispatcher<'_> {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // Retrieve the first parameter if present, or default to 0
+        let first_param = params
+            .iter()
+            .next()
+            .and_then(|sub| sub.first())
+            .copied()
+            .unwrap_or(0);
+
+        match (action, intermediates) {
+            // Primary Device Attributes (DA1): CSI c  or  CSI 0 c
+            ('c', []) if first_param == 0 => {
+                self.reply.extend_from_slice(DA1_RESP);
+            }
+            // Secondary Device Attributes (DA2): CSI > c  or  CSI > 0 c
+            ('c', [b'>']) if first_param == 0 => {
+                self.reply.extend_from_slice(DA2_RESP);
+            }
+            // Request Terminal Name and Version (XTVERSION): CSI > q
+            ('q', [b'>']) => {
+                self.reply.extend_from_slice(&xtversion(
+                    env!("CARGO_PKG_NAME"),
+                    env!("CARGO_PKG_VERSION"),
+                ));
+            }
+            // Device Status Report (DSR) or Cursor Position Report (CPR)
+            ('n', []) => match first_param {
+                // DSR 5n: Request Status Report -> "OK"
+                5 => {
+                    self.reply.extend_from_slice(DSR_OK_RESP);
+                }
+                // DSR 6n: Request Active Position Report (CPR) -> ESC [ line ; col R
+                6 => {
+                    let (row, col) = self.vt100_parser.lock().unwrap().screen().cursor_position();
+                    let cpr = format!("\x1b[{};{}R", row + 1, col + 1);
+                    self.reply.extend_from_slice(cpr.as_bytes());
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
 
 pub fn process_pty_output(
     chunk: &[u8],
     vt100_parser: Arc<Mutex<vt100::Parser>>,
-    parser: &mut termwiz::escape::parser::Parser,
+    parser: &mut vte::Parser,
 ) -> anyhow::Result<Option<Bytes>> {
-    let mut reply = Vec::new();
+    let mut dispatcher = PtyDispatcher {
+        vt100_parser: &vt100_parser,
+        reply: Vec::new(),
+    };
 
-    for action in parser.parse_as_vec(chunk) {
-        if let Action::CSI(csi) = &action {
-            match csi {
-                CSI::Device(boxed) => match boxed.as_ref() {
-                    Device::RequestPrimaryDeviceAttributes => reply.extend_from_slice(DA1),
-                    Device::RequestSecondaryDeviceAttributes => reply.extend_from_slice(DA2),
-                    Device::RequestTerminalNameAndVersion => reply.extend_from_slice(&xtversion(
-                        env!("CARGO_PKG_NAME"),
-                        env!("CARGO_PKG_VERSION"),
-                    )),
-                    Device::StatusReport => reply.extend_from_slice(DSR_OK),
-                    _ => {}
-                },
-                CSI::Cursor(Cursor::RequestActivePositionReport) => {
-                    let (row, col) = vt100_parser.lock().unwrap().screen().cursor_position();
-                    let r = Action::CSI(CSI::Cursor(Cursor::ActivePositionReport {
-                        line: OneBased::from_zero_based(row as u32),
-                        col: OneBased::from_zero_based(col as u32),
-                    }));
-                    write!(reply, "{r}")?;
+    parser.advance(&mut dispatcher, chunk);
+
+    Ok((!dispatcher.reply.is_empty()).then_some(Bytes::from(dispatcher.reply)))
+}
+
+pub struct Osc52Extractor {
+    parser: vte::Parser,
+}
+
+impl Default for Osc52Extractor {
+    fn default() -> Self {
+        let parser = vte::Parser::new();
+        Self { parser }
+    }
+}
+
+impl Osc52Extractor {
+    /// Strips everything EXCEPT complete OSC 52 escape sequences from the byte stream.
+    pub fn extract(&mut self, chunk: &[u8]) -> Bytes {
+        let mut handler = Osc52Handler { output: Vec::new() };
+        self.parser.advance(&mut handler, chunk);
+        Bytes::from(handler.output)
+    }
+}
+
+/// Private helper that collects filtered OSC 52 sequences dispatched by `vte`
+struct Osc52Handler {
+    output: Vec<u8>,
+}
+
+impl Perform for Osc52Handler {
+    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        // OSC 52 sequence structure: OSC 52 ; <target> ; <base64> (ST | BEL)
+        if let Some(&first) = params.first()
+            && first == b"52"
+        {
+            // Alacritty compatibility fix:
+            // Replace empty/missing target (params[1]) with "c"
+            let target = match params.get(1) {
+                Some(t) if !t.is_empty() => *t,
+                _ => b"c",
+            };
+
+            self.output.extend_from_slice(b"\x1b]52;");
+            self.output.extend_from_slice(target);
+
+            // Re-attach payload (params[2] and beyond)
+            if params.len() > 2 {
+                for p in &params[2..] {
+                    self.output.push(b';');
+                    self.output.extend_from_slice(p);
                 }
-                _ => {}
+            } else {
+                self.output.push(b';');
+            }
+
+            // Re-attach original terminator
+            if bell_terminated {
+                self.output.push(0x07);
+            } else {
+                self.output.extend_from_slice(b"\x1b\\");
             }
         }
     }
-    Ok((!reply.is_empty()).then_some(Bytes::from(reply)))
 }

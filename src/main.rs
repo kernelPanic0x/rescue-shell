@@ -4,7 +4,6 @@ mod completer;
 mod console;
 mod helper;
 mod osc52;
-mod osc_extractor;
 mod protocol;
 mod victim;
 

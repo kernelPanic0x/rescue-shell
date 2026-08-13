@@ -191,7 +191,7 @@ impl Victim {
 
         let pty = PtySession::spawn(cols, pty_rows)?;
         let console = LocalConsole::new();
-        let mut queries = termwiz::escape::parser::Parser::new();
+        let mut vte_parser = vte::Parser::new();
         let hub = HelperHub::start(args, statusbar_handle.clone(), vt_parser.clone()).await?;
 
         #[cfg(unix)]
@@ -219,7 +219,7 @@ impl Victim {
                     vt_parser.lock().unwrap().process(&bytes);
 
                     // Answer device queries (DA1/DA2/DSR/CPR/XTVERSION) back to the shell.
-                    if let Some(reply) = process_pty_output(&bytes, vt_parser.clone(), &mut queries)? {
+                    if let Some(reply) = process_pty_output(&bytes, vt_parser.clone(), &mut vte_parser)? {
                         pty.write_input(reply).await?;
                     }
 
