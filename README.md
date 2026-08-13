@@ -1,8 +1,6 @@
 [![License: EUPL 1.2](https://img.shields.io/badge/License-EUPL_1.2-blue.svg)](https://opensource.org/licenses/EUPL-1.2)
 
-# 🛟 rescue-shell
-
-A remote rescue shell that runs everywhere, all at once.
+![Banner](banner.png)
 
 Get a **remote rescue shell** over [magic-wormhole](https://github.com/magic-wormhole/magic-wormhole) and [iroh](https://github.com/n0-computer/iroh) for an end-to-end encrypted interactive PTY session between multiple machines across NATs and firewalls.
 
