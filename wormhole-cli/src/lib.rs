@@ -870,7 +870,7 @@ fn sender_print_code(
     writeln!(
         term,
         "This is equivalent to the following link: \u{001B}]8;;{}\u{001B}\\{}\u{001B}]8;;\u{001B}\\",
-        &uri, &uri
+        uri, uri
     )?;
     if no_qr {
         tracing::debug!("QR option not enabled. Skipping QR code generation.");
