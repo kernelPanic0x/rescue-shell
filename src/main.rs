@@ -25,13 +25,6 @@ Environment Variables:
     SHELL         Set the shell for the session.
                   You can use `echo \"example text\" | $SHELL copy` to copy to helper clipboard.
     RESCUE_SHELL  Is set by rescue-shell to make it more easy to find the executable.
-",
-    help_template = "\
-{about-with-newline}
-{usage-heading} {usage}
-
-{all-args}{after-help}
-Authors: {author}
 "
 )]
 struct Cli {
