@@ -4,6 +4,14 @@ on:
   push:
     branches:
       - main
+      - dev
+    paths:
+      - 'src/**'
+      - 'Cargo.**'
+      - '.github/workflows/**.yml'
+  pull_request:
+    branches:
+      - main
     paths:
       - 'src/**'
       - 'Cargo.**'
@@ -126,6 +134,7 @@ jobs:
   publish:
     name: Update Latest Release
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
