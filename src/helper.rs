@@ -59,6 +59,8 @@ pub struct Helper;
 impl Helper {
     pub async fn run(args: ConnectArgs) -> Result<()> {
         enable_raw_mode()?;
+        #[cfg(windows)]
+        crate::console::enable_vt_input()?;
         let _guard = TermGuard;
 
         let (mut cols, mut rows) = size()?;

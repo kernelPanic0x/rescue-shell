@@ -3744,6 +3744,7 @@ dependencies = [
  "vt100",
  "vte",
  "wincode",
+ "windows-sys 0.61.2",
  "wormhole-cli",
 ]
 

@@ -182,6 +182,8 @@ pub struct Victim {
 impl Victim {
     pub async fn run(args: ServeArgs) -> Result<()> {
         enable_raw_mode()?;
+        #[cfg(windows)]
+        crate::console::enable_vt_input()?;
         let _guard = TermGuard;
 
         let (mut cols, mut rows) = size()?;
@@ -192,6 +194,7 @@ impl Victim {
 
         let pty = PtySession::spawn(cols, pty_rows)?;
         let console = LocalConsole::new();
+        #[cfg(unix)]
         let mut vte_parser = vte::Parser::new();
         let hub = HelperHub::start(args, statusbar_handle.clone(), vt_parser.clone()).await?;
 
@@ -220,6 +223,12 @@ impl Victim {
                     vt_parser.lock().unwrap().process(&bytes);
 
                     // Answer device queries (DA1/DA2/DSR/CPR/XTVERSION) back to the shell.
+                    //
+                    // Unix only: there the shell talks to us over a raw byte pipe.
+                    // On Windows, ConPTY already answers the shell's queries itself, and
+                    // injecting our own ESC-prefixed replies leaks a lone ESC keystroke
+                    // into PSReadLine (bound to RevertLine = clear the command line).
+                    #[cfg(unix)]
                     if let Some(reply) = process_pty_output(&bytes, vt_parser.clone(), &mut vte_parser)? {
                         pty.write_input(reply).await?;
                     }

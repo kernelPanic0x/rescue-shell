@@ -448,3 +448,26 @@ impl Perform for Osc52Handler {
         }
     }
 }
+
+#[cfg(windows)]
+pub fn enable_vt_input() -> std::io::Result<()> {
+    use windows_sys::Win32::System::Console::{
+        ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
+        SetConsoleMode,
+    };
+
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    let mut mode: u32 = 0;
+
+    if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+
+    if unsafe { SetConsoleMode(handle, mode) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(())
+}

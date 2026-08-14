@@ -53,3 +53,6 @@ async-compression = { version = "0.4.43", features = ["lz4", "tokio"] }
 [target.'cfg(unix)'.dependencies]
 signal-hook-tokio = "0.4"
 signal-hook = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation"] }
