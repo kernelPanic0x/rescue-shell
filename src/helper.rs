@@ -16,7 +16,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{io::BufReader, sync::mpsc, time::timeout};
 use tokio_util::codec::LengthDelimitedCodec;
 
 pub struct VictimHub {
@@ -205,8 +205,12 @@ impl Link {
 
         // Note: Helper is the initiator, so it opens the bi-directional stream using open_bi()
         let (tx, rx) = connection.open_bi().await?;
-        let mut raw_writer = tokio_util::codec::FramedWrite::new(tx, LengthDelimitedCodec::new());
-        let mut raw_reader = tokio_util::codec::FramedRead::new(rx, LengthDelimitedCodec::new());
+        let encoder = async_compression::tokio::write::Lz4Encoder::new(tx);
+        let decoder = async_compression::tokio::bufread::Lz4Decoder::new(BufReader::new(rx));
+        let mut raw_writer =
+            tokio_util::codec::FramedWrite::new(encoder, LengthDelimitedCodec::new());
+        let mut raw_reader =
+            tokio_util::codec::FramedRead::new(decoder, LengthDelimitedCodec::new());
 
         // Victim -> Helper
         let victim_helper = tokio::spawn(async move {

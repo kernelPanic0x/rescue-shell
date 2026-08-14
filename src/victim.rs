@@ -20,6 +20,7 @@ use magic_wormhole::{Code, MailboxConnection, Wormhole};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use tokio::io::BufReader;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::codec::LengthDelimitedCodec;
 
@@ -376,8 +377,12 @@ impl ProtocolHandler for Protocol {
         let from_helper = self.from_helper.clone();
 
         let (tx, rx) = c.accept_bi().await?;
-        let mut raw_writer = tokio_util::codec::FramedWrite::new(tx, LengthDelimitedCodec::new());
-        let mut raw_reader = tokio_util::codec::FramedRead::new(rx, LengthDelimitedCodec::new());
+        let encoder = async_compression::tokio::write::Lz4Encoder::new(tx);
+        let decoder = async_compression::tokio::bufread::Lz4Decoder::new(BufReader::new(rx));
+        let mut raw_writer =
+            tokio_util::codec::FramedWrite::new(encoder, LengthDelimitedCodec::new());
+        let mut raw_reader =
+            tokio_util::codec::FramedRead::new(decoder, LengthDelimitedCodec::new());
 
         let initial_state = {
             let parser = self.vt_parser.lock().unwrap();
