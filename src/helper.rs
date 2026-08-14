@@ -131,10 +131,8 @@ impl Helper {
                 incoming = hub.recv() => {
                     match incoming {
                         Some(Msg::Data(bytes)) => {
-                            // Isolate OSC 52 sequences and send directly to local terminal (Alacritty)
-                            let osc52_bytes = osc52_extractor.extract(&bytes);
-                            if !osc52_bytes.is_empty() {
-                                console.write_stdout(osc52_bytes).await?;
+                            if let Some(output) = osc52_extractor.extract(&bytes) {
+                                console.write_stdout(output).await?;
                             }
 
                             vt_parser.lock().unwrap().process(&bytes);

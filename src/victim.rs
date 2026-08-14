@@ -1,7 +1,7 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
-    LocalConsole, Role, StatusBarHandle, TermGuard, is_detach_key, process_pty_output,
-    render_local_screen,
+    LocalConsole, Osc52Extractor, Role, StatusBarHandle, TermGuard, is_detach_key,
+    process_pty_output, render_local_screen,
 };
 use crate::protocol::Msg;
 use crate::protocol::{decode, encode};
@@ -196,6 +196,7 @@ impl Victim {
         let console = LocalConsole::new();
         #[cfg(unix)]
         let mut vte_parser = vte::Parser::new();
+        let mut osc52_extractor = Osc52Extractor::default();
         let hub = HelperHub::start(args, statusbar_handle.clone(), vt_parser.clone()).await?;
 
         #[cfg(unix)]
@@ -231,6 +232,10 @@ impl Victim {
                     #[cfg(unix)]
                     if let Some(reply) = process_pty_output(&bytes, vt_parser.clone(), &mut vte_parser)? {
                         pty.write_input(reply).await?;
+                    }
+
+                    if let Some(output) = osc52_extractor.extract(&bytes) {
+                        console.write_stdout(output).await?;
                     }
 
                     let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);

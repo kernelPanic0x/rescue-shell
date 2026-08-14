@@ -6,9 +6,9 @@ use std::{
 };
 
 use anyhow::anyhow;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use crossterm::{
-    cursor::{MoveTo, Show},
+    cursor::{Hide, MoveTo, Show},
     execute, queue,
     style::{Attribute, Print, SetAttribute, Stylize},
     terminal::{Clear, ClearType, LeaveAlternateScreen, disable_raw_mode},
@@ -209,6 +209,13 @@ pub fn render_local_screen(
         MoveTo(cur_c, cur_r + 1)
     );
 
+    // 5. Sync cursor visibility (DECTCEM: CSI ? 25 l / h) to the physical terminal
+    if screen.hide_cursor() {
+        let _ = queue!(buf, Hide);
+    } else {
+        let _ = queue!(buf, Show);
+    }
+
     Bytes::from(buf)
 }
 
@@ -390,34 +397,44 @@ pub fn process_pty_output(
 
 pub struct Osc52Extractor {
     parser: vte::Parser,
+    buffer: BytesMut,
 }
 
 impl Default for Osc52Extractor {
     fn default() -> Self {
         let parser = vte::Parser::new();
-        Self { parser }
+        let buffer = BytesMut::new();
+        Self { parser, buffer }
     }
 }
 
 impl Osc52Extractor {
     /// Strips everything EXCEPT complete OSC 52 escape sequences from the byte stream.
-    pub fn extract(&mut self, chunk: &[u8]) -> Bytes {
-        let mut handler = Osc52Handler { output: Vec::new() };
+    pub fn extract(&mut self, chunk: &[u8]) -> Option<Bytes> {
+        let mut handler = Osc52Handler {
+            chunk: &mut self.buffer,
+        };
         self.parser.advance(&mut handler, chunk);
-        Bytes::from(handler.output)
+
+        if self.buffer.is_empty() {
+            None
+        } else {
+            Some(self.buffer.split().freeze())
+        }
     }
 }
 
 /// Private helper that collects filtered OSC 52 sequences dispatched by `vte`
-struct Osc52Handler {
-    output: Vec<u8>,
+struct Osc52Handler<'a> {
+    chunk: &'a mut BytesMut,
 }
 
-impl Perform for Osc52Handler {
+impl Perform for Osc52Handler<'_> {
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         // OSC 52 sequence structure: OSC 52 ; <target> ; <base64> (ST | BEL)
         if let Some(&first) = params.first()
             && first == b"52"
+            && params.len() >= 2
         {
             // Alacritty compatibility fix:
             // Replace empty/missing target (params[1]) with "c"
@@ -426,24 +443,24 @@ impl Perform for Osc52Handler {
                 _ => b"c",
             };
 
-            self.output.extend_from_slice(b"\x1b]52;");
-            self.output.extend_from_slice(target);
+            self.chunk.extend_from_slice(b"\x1b]52;");
+            self.chunk.extend_from_slice(target);
 
             // Re-attach payload (params[2] and beyond)
             if params.len() > 2 {
                 for p in &params[2..] {
-                    self.output.push(b';');
-                    self.output.extend_from_slice(p);
+                    self.chunk.extend_from_slice(b";");
+                    self.chunk.extend_from_slice(p);
                 }
             } else {
-                self.output.push(b';');
+                self.chunk.extend_from_slice(b";");
             }
 
             // Re-attach original terminator
             if bell_terminated {
-                self.output.push(0x07);
+                self.chunk.extend_from_slice(&[0x07]);
             } else {
-                self.output.extend_from_slice(b"\x1b\\");
+                self.chunk.extend_from_slice(b"\x1b\\");
             }
         }
     }
