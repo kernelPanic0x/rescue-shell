@@ -131,6 +131,19 @@ jobs:
           path: ${{ steps.prepare.outputs.artifact_path }}
           if-no-files-found: error
 
+  ci-ok:
+    name: CI
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify build result
+        run: |
+          case "${{ needs.build.result }}" in
+            success|skipped) exit 0 ;;
+            *) exit 1 ;;
+          esac
+
   publish:
     name: Update Latest Release
     needs: build
