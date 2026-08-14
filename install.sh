@@ -43,7 +43,7 @@ case "$OS" in
         ;;
 esac
 
-URL="https://github.com/kernelPanic0x/rescue-shell/releases/download/latest/rescue-shell-${TUPLE}"
+URL="https://github.com/kernelPanic0x/rescue-shell/releases/download/latest/rescue-shell-${TUPLE}.gz"
 
 log() { printf '[*] %s\n' "$*" >&2; }
 die() { printf '[!] %s\n' "$*" >&2; exit 1; }
@@ -54,7 +54,7 @@ BIN="$(mktemp "${TMPDIR:-/tmp}/rescue-shell.XXXXXX")" || die "no writable temp d
 trap 'rm -f "$BIN"' EXIT
 
 log "downloading ${URL}"
-curl -fSL --retry 3 -o "$BIN" "$URL" || die "download failed (no build for ${TUPLE}?)"
+curl -fSL --retry 3 "$URL" | gzip -dc > "$BIN" || die "download failed (no build for ${TUPLE}?)"
 chmod 700 "$BIN"
 
 export WORMHOLE_RELAY_URL="${WORMHOLE_RELAY_URL:-tcp://nbg.ell.dns64.de:4001}"
