@@ -196,7 +196,8 @@ impl Victim {
         let console = LocalConsole::new();
         let mut vte_parser = vte::Parser::new();
         let mut osc52_extractor = Osc52Extractor::default();
-        let hub = HelperHub::start(args, statusbar_handle.clone(), vt_parser.clone()).await?;
+        let hub =
+            HelperHub::start(args.clone(), statusbar_handle.clone(), vt_parser.clone()).await?;
 
         let mut sigwinch = window_change_signal();
 
@@ -247,7 +248,9 @@ impl Victim {
                 Some(msg) = hub.recv() => {
                     match msg {
                         Msg::Data(bytes) => {
-                            pty.write_input(bytes).await?;
+                            if !args.read_only_helper {
+                                pty.write_input(bytes).await?;
+                            }
                         }
                         Msg::Resize { cols, rows } => {
                             pty.resize(cols, rows)?;

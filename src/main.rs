@@ -99,6 +99,10 @@ struct ServeArgs {
     /// Read allowed peers from file seperated by any whitespace.
     #[arg(long, env = "RESCUE_SHELL_ALLOWED_PUBLIC_KEYS_FILE")]
     allowed_public_keys_file: Option<PathBuf>,
+
+    /// Helper is only allowed to read but not to write
+    #[arg(long)]
+    read_only_helper: bool,
 }
 
 #[tokio::main]
