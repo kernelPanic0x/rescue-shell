@@ -494,3 +494,44 @@ pub fn enable_vt_input() -> std::io::Result<()> {
 
     Ok(())
 }
+
+pub fn window_change_signal() -> mpsc::Receiver<()> {
+    let (tx, rx) = mpsc::channel::<()>(1);
+
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+            .expect("SIGWINCH registration");
+
+        while sig.recv().await.is_some() {
+            // Drop duplicate signals if receiver hasn't processed the previous one
+            if matches!(tx.try_send(()), Err(mpsc::error::TrySendError::Closed(_))) {
+                break;
+            }
+        }
+    });
+
+    #[cfg(windows)]
+    tokio::spawn(async move {
+        use crossterm::terminal::size;
+
+        let mut last = size().expect("console size");
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+
+        loop {
+            interval.tick().await;
+            let now = size().expect("console size");
+
+            if now != last {
+                last = now;
+
+                // Coalesce events: send if empty, drop if full, break if closed
+                if matches!(tx.try_send(()), Err(mpsc::error::TrySendError::Closed(_))) {
+                    break;
+                }
+            }
+        }
+    });
+
+    rx
+}

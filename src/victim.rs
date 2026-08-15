@@ -1,7 +1,7 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
     LocalConsole, Osc52Extractor, Role, StatusBarHandle, TermGuard, is_detach_key,
-    process_pty_output, render_local_screen,
+    process_pty_output, render_local_screen, window_change_signal,
 };
 use crate::protocol::Msg;
 use crate::protocol::{decode, encode};
@@ -198,16 +198,9 @@ impl Victim {
         let mut osc52_extractor = Osc52Extractor::default();
         let hub = HelperHub::start(args, statusbar_handle.clone(), vt_parser.clone()).await?;
 
-        #[cfg(unix)]
-        let mut sigwinch =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+        let mut sigwinch = window_change_signal();
 
         let res: Result<()> = loop {
-            #[cfg(unix)]
-            let sigwinch_recv = sigwinch.recv();
-            #[cfg(not(unix))]
-            let sigwinch_recv = std::future::pending::<Option<()>>();
-
             tokio::select! {
                 // Statusbar update
                 _ = statusbar_rx.changed() => {
@@ -265,7 +258,7 @@ impl Victim {
                 }
 
                 // Window resized locally -> update PTY & VT Parser
-                _ = sigwinch_recv => {
+                _ = sigwinch.recv() => {
                     if let Ok((new_cols, new_rows)) = size() {
                         cols = new_cols;
                         rows = new_rows;

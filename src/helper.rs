@@ -3,7 +3,7 @@ use crate::{
     common::{ALPN, ConnectionStateWatcher},
     console::{
         LocalConsole, Osc52Extractor, Role, StatusBarHandle, TermGuard, is_detach_key,
-        render_local_screen,
+        render_local_screen, window_change_signal,
     },
     protocol::{Msg, decode, encode},
 };
@@ -80,16 +80,9 @@ impl Helper {
         })
         .await?;
 
-        #[cfg(unix)]
-        let mut sigwinch =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+        let mut sigwinch = window_change_signal();
 
         let res: Result<()> = loop {
-            #[cfg(unix)]
-            let sigwinch_recv = sigwinch.recv();
-            #[cfg(not(unix))]
-            let sigwinch_recv = std::future::pending::<Option<()>>();
-
             tokio::select! {
                 // Status bar update -> render frame locally
                 _ = statusbar_rx.changed() => {
@@ -111,7 +104,7 @@ impl Helper {
                 }
 
                 // Window resize signal (SIGWINCH)
-                _ = sigwinch_recv => {
+                _ = sigwinch.recv() => {
                     if let Ok((new_cols, new_rows)) = size() {
                         cols = new_cols;
                         rows = new_rows;
