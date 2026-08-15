@@ -346,35 +346,41 @@ impl Perform for PtyDispatcher<'_> {
             .unwrap_or(0);
 
         match (action, intermediates) {
-            // Primary Device Attributes (DA1): CSI c  or  CSI 0 c
+            // DA1 (CSI c / CSI 0 c): answer on ALL platforms — ConPTY sends this to us.
             ('c', []) if first_param == 0 => {
                 self.reply.extend_from_slice(DA1_RESP);
             }
-            // Secondary Device Attributes (DA2): CSI > c  or  CSI > 0 c
-            ('c', [b'>']) if first_param == 0 => {
-                self.reply.extend_from_slice(DA2_RESP);
-            }
-            // Request Terminal Name and Version (XTVERSION): CSI > q
-            ('q', [b'>']) => {
-                self.reply.extend_from_slice(&xtversion(
-                    env!("CARGO_PKG_NAME"),
-                    env!("CARGO_PKG_VERSION"),
-                ));
-            }
-            // Device Status Report (DSR) or Cursor Position Report (CPR)
+
             ('n', []) => match first_param {
-                // DSR 5n: Request Status Report -> "OK"
-                5 => {
-                    self.reply.extend_from_slice(DSR_OK_RESP);
-                }
-                // DSR 6n: Request Active Position Report (CPR) -> ESC [ line ; col R
+                // CPR (DSR 6n): answer on ALL platforms — ConPTY needs the cursor position.
                 6 => {
                     let (row, col) = self.vt100_parser.lock().unwrap().screen().cursor_position();
                     let cpr = format!("\x1b[{};{}R", row + 1, col + 1);
                     self.reply.extend_from_slice(cpr.as_bytes());
                 }
+                // DSR 5n: Unix only. On Windows ConPTY answers this for the shell
+                // itself; emitting our own leaks an ESC keystroke.
+                #[cfg(unix)]
+                5 => {
+                    self.reply.extend_from_slice(DSR_OK_RESP);
+                }
                 _ => {}
             },
+
+            // Unix only: the shell queries us directly. On Windows these never reach
+            // us (ConPTY answers them), and answering unsolicited leaks an ESC.
+            #[cfg(unix)]
+            ('c', b">") if first_param == 0 => {
+                self.reply.extend_from_slice(DA2_RESP);
+            }
+            #[cfg(unix)]
+            ('q', b">") => {
+                self.reply.extend_from_slice(&xtversion(
+                    env!("CARGO_PKG_NAME"),
+                    env!("CARGO_PKG_VERSION"),
+                ));
+            }
+
             _ => {}
         }
     }

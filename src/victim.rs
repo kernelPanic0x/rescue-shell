@@ -194,7 +194,6 @@ impl Victim {
 
         let pty = PtySession::spawn(cols, pty_rows)?;
         let console = LocalConsole::new();
-        #[cfg(unix)]
         let mut vte_parser = vte::Parser::new();
         let mut osc52_extractor = Osc52Extractor::default();
         let hub = HelperHub::start(args, statusbar_handle.clone(), vt_parser.clone()).await?;
@@ -229,7 +228,6 @@ impl Victim {
                     // On Windows, ConPTY already answers the shell's queries itself, and
                     // injecting our own ESC-prefixed replies leaks a lone ESC keystroke
                     // into PSReadLine (bound to RevertLine = clear the command line).
-                    #[cfg(unix)]
                     if let Some(reply) = process_pty_output(&bytes, vt_parser.clone(), &mut vte_parser)? {
                         pty.write_input(reply).await?;
                     }
