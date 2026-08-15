@@ -11,14 +11,26 @@ Get a **remote rescue shell** over [magic-wormhole](https://github.com/magic-wor
 
 ### 1. On the machine needing help:
 ```bash
-curl -sL run.any64.de | bash
+curl -sL https://run.any64.de | bash
 ```
-It will generate and display a one-time code (e.g., `7-guitar-battery`).
+
+or directly from github:
+```bash
+curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | bash
+```
+
+It will display a one-time code (e.g., `7-guitar-battery`).
 
 ### 2. On the machine helping:
 ```bash
-curl -sL run.any64.de | bash -s -- connect
+curl -sL https://run.any64.de | bash -s -- connect
 ```
+
+or directly from github:
+```bash
+curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | bash -s -- connect
+```
+
 Enter the code when prompted. 
 
 > **Exit:** Press `Ctrl+]` to detach from the session cleanly.

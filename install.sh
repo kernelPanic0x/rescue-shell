@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# usage: curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | bash
 set -euo pipefail
 
 is_android() {
@@ -54,7 +53,7 @@ BIN="$(mktemp "${TMPDIR:-/tmp}/rescue-shell.XXXXXX")" || die "no writable temp d
 trap 'rm -f "$BIN"' EXIT
 
 log "downloading ${URL}"
-curl -fSL --retry 3 "$URL" | gzip -dc > "$BIN" || die "download failed (no build for ${TUPLE}?)"
+curl --proto '=https' -fSL --retry 3 "$URL" | gzip -dc > "$BIN" || die "download failed (no build for ${TUPLE}?)"
 chmod 700 "$BIN"
 
 export WORMHOLE_RELAY_URL="${WORMHOLE_RELAY_URL:-tcp://nbg.ell.dns64.de:4001}"
