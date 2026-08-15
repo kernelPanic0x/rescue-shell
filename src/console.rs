@@ -10,7 +10,9 @@ use bytes::{Bytes, BytesMut};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     execute, queue,
-    style::{Attribute, Print, SetAttribute, Stylize},
+    style::{
+        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
     terminal::{Clear, ClearType, LeaveAlternateScreen, disable_raw_mode},
 };
 use magic_wormhole::Code;
@@ -40,6 +42,18 @@ pub enum Role {
     Helper,
 }
 
+/// Check if the terminal environment supports UTF-8 glyphs
+fn supports_unicode() -> bool {
+    // Windows Terminal / modern shells or UTF-8 locale on Linux/macOS
+    if let Ok(lang) = std::env::var("LANG")
+        && (lang.contains("UTF-8") || lang.contains("utf8") || lang.contains("UTF8"))
+    {
+        return true;
+    }
+    // Check for modern terminal emulators
+    std::env::var("TERM_PROGRAM").is_ok() || std::env::var("WT_SESSION").is_ok()
+}
+
 #[derive(Clone, Debug)]
 pub struct StatusBarState {
     pub code: Option<Code>,
@@ -61,45 +75,103 @@ impl StatusBarState {
     }
 
     pub fn render_to(&self, buf: &mut Vec<u8>, cols: u16) {
-        let code = match &self.code {
+        let is_utf8 = supports_unicode();
+        let width = cols as usize;
+
+        let code_str = match &self.code {
             Some(code) => code.to_string(),
             None => "No code".to_string(),
         };
 
-        let title = format!("rescue-shell {}", env!("CARGO_PKG_VERSION"));
-        let role = self.role.to_string();
-        let connected_helpers = format!("Connected: {}", self.connected_helpers);
-        let internet_state = format!("{}", self.internet_state);
-        let raw_text = format!(
-            "{code} | {title} | {role} | {connected_helpers} | {internet_state} | CTRL+] to exit",
-        );
+        // Wormhole Palette (Standard ANSI - Compatible Everywhere!)
+        let bar_bg = Color::AnsiValue(17);
+        let default_fg = Color::White;
+        let separator_fg = Color::White;
+        let code_fg = Color::White;
 
-        let width = cols as usize;
-        let char_count = raw_text.chars().count();
-
-        // 2. Marquee logic: pad if fits, scroll if too long
-        let padded_text = if char_count <= width {
-            // Fits inside terminal width: pad right with spaces
-            format!("{:<width$}", raw_text, width = width)
-        } else {
-            // Exceeds terminal width: cycle continuously with a separator
-            let separator = "   ***   ";
-            let full_text = format!("{raw_text}{separator}");
-            let total_chars = full_text.chars().count();
-
-            let offset = self.tick % total_chars;
-
-            // Safely slice full_text across UTF-8 boundaries starting at `offset`
-            full_text
-                .chars()
-                .cycle()
-                .skip(offset)
-                .take(width)
-                .collect::<String>()
+        let (net_str, net_fg) = match self.internet_state {
+            InternetState::Online(ping) => {
+                let symbol = if is_utf8 { "●" } else { "[+]" };
+                (
+                    format!("{symbol} Online ({} ms)", ping.as_millis()),
+                    Color::Green,
+                )
+            }
+            InternetState::Offline => {
+                let symbol = if is_utf8 { "×" } else { "[-]" };
+                (format!("{symbol} Offline"), Color::Red)
+            }
         };
 
-        // Render at top row
-        let _ = queue!(buf, MoveTo(0, 0), Print(padded_text.black().on_white()));
+        let (helper_str, helper_fg) = if self.connected_helpers > 0 {
+            (
+                format!("{} Connected", self.connected_helpers),
+                Color::Green,
+            )
+        } else {
+            ("0 Connected".to_string(), Color::DarkGrey)
+        };
+
+        let title = format!("rescue-shell {}", env!("CARGO_PKG_VERSION"));
+        let role = self.role.to_string();
+
+        // Segments: (text, fg_color, is_bold)
+        let mut segments = vec![
+            (code_str.as_str(), code_fg, Attribute::Bold),
+            (" ║ ", separator_fg, Attribute::NormalIntensity),
+            (&title, default_fg, Attribute::NormalIntensity),
+            (" ║ ", separator_fg, Attribute::NormalIntensity),
+            (&role, default_fg, Attribute::NormalIntensity),
+            (" ║ ", separator_fg, Attribute::NormalIntensity),
+            (&helper_str, helper_fg, Attribute::NormalIntensity),
+            (" ║ ", separator_fg, Attribute::NormalIntensity),
+            (&net_str, net_fg, Attribute::NormalIntensity),
+            (" ║ CTRL+] to exit", default_fg, Attribute::NormalIntensity),
+        ];
+
+        let content_len: usize = segments.iter().map(|(s, _, _)| s.chars().count()).sum();
+
+        let mut styled_chars: Vec<(char, Color, Attribute)> = Vec::new();
+
+        if content_len <= width {
+            for (text, fg, bold) in segments {
+                styled_chars.extend(text.chars().map(|c| (c, fg, bold)));
+            }
+            styled_chars.extend(std::iter::repeat_n(
+                (' ', default_fg, Attribute::NormalIntensity),
+                width - content_len,
+            ));
+        } else {
+            segments.push(("   ***   ", separator_fg, Attribute::NormalIntensity));
+            for (text, fg, bold) in segments {
+                styled_chars.extend(text.chars().map(|c| (c, fg, bold)));
+            }
+        }
+
+        let offset = if content_len <= width {
+            0
+        } else {
+            self.tick % styled_chars.len()
+        };
+
+        let visible_window: Vec<(char, Color, Attribute)> = styled_chars
+            .into_iter()
+            .cycle()
+            .skip(offset)
+            .take(width)
+            .collect();
+
+        let _ = queue!(buf, MoveTo(0, 0), SetBackgroundColor(bar_bg));
+
+        for chunk in visible_window.chunk_by(|a, b| a.1 == b.1 && a.2 == b.2) {
+            let fg = chunk[0].1;
+            let attr = chunk[0].2;
+            let text: String = chunk.iter().map(|(c, _, _)| c).collect();
+
+            let _ = queue!(buf, SetForegroundColor(fg), SetAttribute(attr), Print(text));
+        }
+
+        let _ = queue!(buf, ResetColor, SetAttribute(Attribute::NormalIntensity));
     }
 }
 
