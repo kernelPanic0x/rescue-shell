@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fmt,
     io::{Read, Write},
     sync::{Arc, Mutex},
@@ -78,12 +79,6 @@ impl StatusBarState {
         let is_utf8 = supports_unicode();
         let width = cols as usize;
 
-        let code_str = match &self.code {
-            Some(code) => code.to_string(),
-            None => "No code".to_string(),
-        };
-
-        // Wormhole Palette (Standard ANSI - Compatible Everywhere!)
         let bar_bg = Color::AnsiValue(17);
         let default_fg = Color::White;
         let separator_fg = Color::White;
@@ -105,28 +100,35 @@ impl StatusBarState {
 
         let (helper_str, helper_fg) = if self.connected_helpers > 0 {
             (
-                format!("{} Connected", self.connected_helpers),
+                format!("{} Connected", self.connected_helpers).into(),
                 Color::Green,
             )
         } else {
-            ("0 Connected".to_string(), Color::DarkGrey)
+            (Cow::Borrowed("0 Connected"), Color::DarkGrey)
         };
 
         let title = format!("rescue-shell {}", env!("CARGO_PKG_VERSION"));
         let role = self.role.to_string();
 
         // Segments: (text, fg_color, is_bold)
-        let mut segments = vec![
-            (code_str.as_str(), code_fg, Attribute::Bold),
-            (" ║ ", separator_fg, Attribute::NormalIntensity),
-            (&title, default_fg, Attribute::NormalIntensity),
-            (" ║ ", separator_fg, Attribute::NormalIntensity),
-            (&role, default_fg, Attribute::NormalIntensity),
-            (" ║ ", separator_fg, Attribute::NormalIntensity),
-            (&helper_str, helper_fg, Attribute::NormalIntensity),
-            (" ║ ", separator_fg, Attribute::NormalIntensity),
-            (&net_str, net_fg, Attribute::NormalIntensity),
-            (" ║ CTRL+] to exit", default_fg, Attribute::NormalIntensity),
+        let mut segments: Vec<(Cow<'_, str>, Color, Attribute)> = vec![
+            match &self.code {
+                Some(code) => (code.to_string().into(), code_fg, Attribute::Bold),
+                None => ("No code".into(), code_fg, Attribute::NormalIntensity),
+            },
+            (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
+            (title.into(), default_fg, Attribute::NormalIntensity),
+            (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
+            (role.into(), default_fg, Attribute::NormalIntensity),
+            (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
+            (helper_str, helper_fg, Attribute::NormalIntensity),
+            (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
+            (net_str.into(), net_fg, Attribute::NormalIntensity),
+            (
+                " ║ CTRL+] to exit".into(),
+                default_fg,
+                Attribute::NormalIntensity,
+            ),
         ];
 
         let content_len: usize = segments.iter().map(|(s, _, _)| s.chars().count()).sum();
@@ -142,7 +144,7 @@ impl StatusBarState {
                 width - content_len,
             ));
         } else {
-            segments.push(("   ***   ", separator_fg, Attribute::NormalIntensity));
+            segments.push(("   ***   ".into(), separator_fg, Attribute::NormalIntensity));
             for (text, fg, bold) in segments {
                 styled_chars.extend(text.chars().map(|c| (c, fg, bold)));
             }
