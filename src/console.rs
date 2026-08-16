@@ -10,6 +10,7 @@ use anyhow::{Context, anyhow};
 use bytes::{Bytes, BytesMut};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
+    event::DisableMouseCapture,
     execute, queue,
     style::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
@@ -402,6 +403,7 @@ impl Drop for LocalConsole {
             stdout,
             SetAttribute(Attribute::Reset),
             LeaveAlternateScreen,
+            DisableMouseCapture,
             Show
         );
 
