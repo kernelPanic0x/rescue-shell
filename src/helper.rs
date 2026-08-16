@@ -2,13 +2,13 @@ use crate::{
     ConnectArgs, app_config,
     common::{ALPN, ConnectionStateWatcher},
     console::{
-        LocalConsole, Osc52Extractor, Role, StatusBarHandle, TermGuard, is_detach_key,
-        render_local_screen, window_change_signal,
+        LocalConsole, Osc52Extractor, Role, StatusBarHandle, is_detach_key, render_local_screen,
+        window_change_signal,
     },
     protocol::{Msg, decode, encode},
 };
 use anyhow::{Context, Result, anyhow};
-use crossterm::terminal::{enable_raw_mode, size};
+use crossterm::terminal::size;
 use futures::{SinkExt, StreamExt};
 use iroh::{Endpoint, PublicKey, SecretKey, endpoint::presets};
 use magic_wormhole::{MailboxConnection, Wormhole};
@@ -58,10 +58,7 @@ pub struct Helper;
 
 impl Helper {
     pub async fn run(args: ConnectArgs) -> Result<()> {
-        enable_raw_mode()?;
-        #[cfg(windows)]
-        crate::console::enable_vt_input()?;
-        let _guard = TermGuard;
+        let console = LocalConsole::new()?;
 
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
@@ -69,7 +66,6 @@ impl Helper {
         let statusbar_handle = StatusBarHandle::new(Role::Helper);
         let mut statusbar_rx = statusbar_handle.subscribe();
 
-        let console = LocalConsole::new();
         let mut osc52_extractor = Osc52Extractor::default();
         let hub = VictimHub::connect(args, statusbar_handle.clone()).await?;
 

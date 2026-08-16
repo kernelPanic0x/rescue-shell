@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use bytes::{Bytes, BytesMut};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -14,7 +14,10 @@ use crossterm::{
     style::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
-    terminal::{Clear, ClearType, LeaveAlternateScreen, disable_raw_mode},
+    terminal::{
+        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+        enable_raw_mode,
+    },
 };
 use magic_wormhole::Code;
 use tokio::sync::{mpsc, watch};
@@ -293,40 +296,21 @@ pub fn render_local_screen(
     Bytes::from(buf)
 }
 
-/// Restore Victim host terminal mode on exit.
-pub struct TermGuard;
-impl Drop for TermGuard {
-    fn drop(&mut self) {
-        let mut stdout = std::io::stdout();
-
-        let _ = execute!(
-            stdout,
-            SetAttribute(Attribute::Reset),
-            LeaveAlternateScreen,
-            Clear(ClearType::All),
-            MoveTo(0, 0),
-            Show
-        );
-
-        let _ = disable_raw_mode();
-
-        println!("\r\n[session ended]");
-    }
-}
-
 pub fn is_detach_key(bytes: &[u8]) -> bool {
     // Ctrl+] (0x1D) detaches locally
     bytes.contains(&0x1d)
 }
 
 pub struct LocalConsole {
-    stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>, // local keyboard
-    stdout_tx: mpsc::Sender<Bytes>,                      // rendered frames -> local terminal
+    stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
+    stdout_tx: Option<mpsc::Sender<Bytes>>,
     stdout_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl LocalConsole {
-    pub fn new() -> Self {
+    pub fn new() -> anyhow::Result<Self> {
+        LocalConsole::setup().context("Console setup")?;
+
         // Keyboard reader: blocking std::io::stdin() on a plain OS thread,
         // pushed into the channel that the async loop consumes.
         let (stdin_tx, stdin_rx) = mpsc::channel::<Bytes>(64);
@@ -358,11 +342,24 @@ impl LocalConsole {
             }
         });
 
-        Self {
+        Ok(Self {
             stdin_rx: tokio::sync::Mutex::new(stdin_rx),
-            stdout_tx,
+            stdout_tx: Some(stdout_tx),
             stdout_handle: tokio::sync::Mutex::new(Some(stdout_handle)),
-        }
+        })
+    }
+
+    fn setup() -> anyhow::Result<()> {
+        enable_raw_mode()?;
+
+        #[cfg(windows)]
+        crate::console::enable_vt_input()?;
+
+        let mut stdout = std::io::stdout();
+
+        execute!(stdout, EnterAlternateScreen)?;
+
+        Ok(())
     }
 
     pub async fn read_stdin(&self) -> Option<Bytes> {
@@ -370,15 +367,39 @@ impl LocalConsole {
     }
 
     pub async fn write_stdout(&self, bytes: Bytes) -> anyhow::Result<()> {
-        self.stdout_tx.send(bytes).await.map_err(|e| anyhow!(e))
+        self.stdout_tx
+            .as_ref()
+            .ok_or_else(|| anyhow!("Console stdout closed"))?
+            .send(bytes)
+            .await
+            .map_err(|e| anyhow!(e))
     }
 
-    pub async fn flush_and_close(self) {
-        drop(self.stdout_tx);
+    pub async fn flush_and_close(mut self) {
+        self.stdout_tx.take();
         let handle = self.stdout_handle.lock().await.take();
         if let Some(h) = handle {
             let _ = h.await; // drain remaining frames to the local terminal
         }
+    }
+}
+
+impl Drop for LocalConsole {
+    fn drop(&mut self) {
+        let mut stdout = std::io::stdout();
+
+        let _ = execute!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            LeaveAlternateScreen,
+            Clear(ClearType::All),
+            MoveTo(0, 0),
+            Show
+        );
+
+        let _ = disable_raw_mode();
+
+        println!("\r\n[session ended]");
     }
 }
 

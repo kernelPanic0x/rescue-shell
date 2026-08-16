@@ -1,14 +1,14 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
-    LocalConsole, Osc52Extractor, Role, StatusBarHandle, TermGuard, is_detach_key,
-    process_pty_output, render_local_screen, window_change_signal,
+    LocalConsole, Osc52Extractor, Role, StatusBarHandle, is_detach_key, process_pty_output,
+    render_local_screen, window_change_signal,
 };
 use crate::protocol::Msg;
 use crate::protocol::{decode, encode};
 use crate::{ServeArgs, app_config};
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
-use crossterm::terminal::{enable_raw_mode, size};
+use crossterm::terminal::size;
 use futures::{SinkExt, StreamExt};
 use iroh::PublicKey;
 use iroh::{
@@ -181,10 +181,7 @@ pub struct Victim {
 
 impl Victim {
     pub async fn run(args: ServeArgs) -> Result<()> {
-        enable_raw_mode()?;
-        #[cfg(windows)]
-        crate::console::enable_vt_input()?;
-        let _guard = TermGuard;
+        let console = LocalConsole::new()?;
 
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
@@ -193,7 +190,6 @@ impl Victim {
         let mut statusbar_rx = statusbar_handle.subscribe();
 
         let pty = PtySession::spawn(cols, pty_rows)?;
-        let console = LocalConsole::new();
         let mut vte_parser = vte::Parser::new();
         let mut osc52_extractor = Osc52Extractor::default();
         let hub =
