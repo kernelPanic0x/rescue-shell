@@ -15,8 +15,7 @@ use crossterm::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
     terminal::{
-        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-        enable_raw_mode,
+        Clear, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     },
 };
 use magic_wormhole::Code;
@@ -403,14 +402,12 @@ impl Drop for LocalConsole {
             stdout,
             SetAttribute(Attribute::Reset),
             LeaveAlternateScreen,
-            Clear(ClearType::All),
-            MoveTo(0, 0),
             Show
         );
 
         let _ = disable_raw_mode();
 
-        println!("\r\n[session ended]");
+        println!("[session ended]");
     }
 }
 
