@@ -23,6 +23,8 @@ use magic_wormhole::Code;
 use tokio::sync::{mpsc, watch};
 use vte::{Params, Perform};
 
+pub const SCROLLBACK_LINES: usize = 1000;
+
 #[derive(Clone, Debug)]
 pub enum InternetState {
     Online(Duration),
@@ -258,6 +260,12 @@ pub fn render_local_screen(
     // 1. Sync physical terminal input modes (DECCKM for arrow keys, mouse, etc.)
     buf.extend_from_slice(&screen.input_mode_formatted());
 
+    // Override the remote app's mouse state on OUR physical terminal.
+    // Force SGR mouse reporting so the wheel arrives as ESC[<64/65;…M
+    // instead of being collapsed into Up/Down arrows by the terminal's
+    // alternate-screen scroll fallback. Must come AFTER input_mode_formatted().
+    buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
+
     // 2. Draw status bar on physical Row 0
     status_bar.render_to(&mut buf, cols);
 
@@ -278,16 +286,19 @@ pub fn render_local_screen(
         buf.extend_from_slice(&row_bytes);
     }
 
-    // 4. Move terminal cursor to virtual cursor position
-    let (cur_r, cur_c) = screen.cursor_position();
-    let _ = queue!(
-        buf,
-        SetAttribute(crossterm::style::Attribute::Reset),
-        MoveTo(cur_c, cur_r + 1)
-    );
+    // 4. Move terminal cursor to virtual cursor position (live view only)
+    let scrolled = screen.scrollback() > 0;
+    if !scrolled {
+        let (cur_r, cur_c) = screen.cursor_position();
+        let _ = queue!(
+            buf,
+            SetAttribute(crossterm::style::Attribute::Reset),
+            MoveTo(cur_c, cur_r + 1)
+        );
+    }
 
-    // 5. Sync cursor visibility (DECTCEM: CSI ? 25 l / h) to the physical terminal
-    if screen.hide_cursor() {
+    // 5. Cursor visibility: hide while scrolled back
+    if scrolled || screen.hide_cursor() {
         let _ = queue!(buf, Hide);
     } else {
         let _ = queue!(buf, Show);
@@ -629,4 +640,55 @@ pub fn window_change_signal() -> mpsc::Receiver<()> {
     });
 
     rx
+}
+
+/// Adjust the vt100 viewport and return the new scrollback offset.
+/// Positive delta scrolls back (older), negative scrolls forward (toward live).
+pub fn apply_scroll(parser: &Arc<Mutex<vt100::Parser>>, delta: i32) -> usize {
+    let mut parser = parser.lock().unwrap();
+    let current = parser.screen().scrollback() as i64;
+    let next = (current + delta as i64).clamp(0, i64::MAX) as usize;
+    // set_scrollback clamps the upper bound to the actual history length,
+    // so we never need to know the max ourselves.
+    parser.screen_mut().set_scrollback(next);
+    parser.screen().scrollback()
+}
+
+/// Returns Some(delta) when `bytes` is a local scroll gesture and must NOT be
+/// forwarded to the remote shell. Positive = scroll back (older).
+pub fn scroll_delta(bytes: &[u8], page_size: i32) -> Option<i32> {
+    match bytes {
+        b"\x1b[5~" => Some(page_size),    // PageUp
+        b"\x1b[6~" => Some(-page_size),   // PageDown
+        b"\x1b[5;2~" => Some(page_size),  // Shift+PageUp
+        b"\x1b[6;2~" => Some(-page_size), // Shift+PageDown
+        b"\x1b[1;5A" => Some(1),          // Ctrl+Up
+        b"\x1b[1;5B" => Some(-1),         // Ctrl+Down
+        _ => sgr_wheel_delta(bytes, 3),   // mouse wheel, if enabled (see below)
+    }
+}
+
+/// SGR mouse wheel: ESC [ < 64/65 ; row ; col M/m
+fn sgr_wheel_delta(bytes: &[u8], lines: i32) -> Option<i32> {
+    let body = bytes.strip_prefix(b"\x1b[<")?;
+
+    // Find the index of the first semicolon to replace `split_once`
+    let idx = body.iter().position(|&b| b == b';')?;
+    let button = &body[..idx];
+    let rest = &body[idx + 1..];
+
+    if !rest.contains(&b';') || *rest.last()? != b'M' {
+        return None; // press only; ignore the matching release `m`
+    }
+
+    let button: i32 = std::str::from_utf8(button).ok()?.parse().ok()?;
+    match button {
+        64 => Some(lines),  // wheel up
+        65 => Some(-lines), // wheel down
+        _ => None,
+    }
+}
+
+pub fn is_sgr_mouse(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x1b[<") && matches!(bytes.last(), Some(b'M') | Some(b'm'))
 }

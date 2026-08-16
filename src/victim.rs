@@ -1,7 +1,8 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
-    LocalConsole, Osc52Extractor, Role, StatusBarHandle, is_detach_key, process_pty_output,
-    render_local_screen, window_change_signal,
+    LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, apply_scroll,
+    is_detach_key, is_sgr_mouse, process_pty_output, render_local_screen, scroll_delta,
+    window_change_signal,
 };
 use crate::protocol::Msg;
 use crate::protocol::{decode, encode};
@@ -185,7 +186,11 @@ impl Victim {
 
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
-        let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(pty_rows, cols, 1000)));
+        let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(
+            pty_rows,
+            cols,
+            SCROLLBACK_LINES,
+        )));
         let statusbar_handle = StatusBarHandle::new(Role::Victim);
         let mut statusbar_rx = statusbar_handle.subscribe();
 
@@ -237,6 +242,38 @@ impl Victim {
                     if is_detach_key(&bytes) {
                         break Ok(());
                     }
+
+                    let (alt, mouse_on, scrolled) = {
+                        let p = vt_parser.lock().unwrap();
+                        (
+                            p.screen().alternate_screen(),
+                            p.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None,
+                            p.screen().scrollback() > 0,
+                        )
+                    };
+
+
+                    if !alt {
+                        if let Some(delta) = scroll_delta(&bytes, pty_rows as i32) {
+                            let offset = apply_scroll(&vt_parser, delta);
+                            hub.broadcast(Msg::ScrollTo { offset: offset as u32 });
+                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
+                            console.write_stdout(frame).await?;
+                            continue;
+                        }
+
+                        if is_sgr_mouse(&bytes) && !mouse_on {
+                            continue;
+                        }
+
+                        if scrolled {
+                            vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
+                            hub.broadcast(Msg::ScrollTo { offset: 0 });
+                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
+                            console.write_stdout(frame).await?;
+                        }
+                    }
+
                     pty.write_input(bytes).await?;
                 }
 
@@ -253,6 +290,15 @@ impl Victim {
                         }
                         Msg::Bye => {},
                         Msg::ConnectedHelpers(_) => {},
+                        Msg::ScrollTo { offset } => {
+                            vt_parser.lock().unwrap().screen_mut().set_scrollback(offset as usize);
+
+                            // Rebroadcast so every helper (including the one that asked) converges.
+                            hub.broadcast(Msg::ScrollTo { offset });
+
+                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
+                            console.write_stdout(frame).await?;
+                        }
                     }
                 }
 

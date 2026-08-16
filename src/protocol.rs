@@ -20,6 +20,13 @@ pub enum Msg {
     Bye,
 
     ConnectedHelpers(u8),
+
+    /// Authoritative scrollback viewport offset.
+    /// `0` = live screen; `n` = n lines scrolled back (older content).
+    /// Sent helper -> victim as a request, victim -> helpers as the synced state.
+    ScrollTo {
+        offset: u32,
+    },
 }
 
 pub fn encode(msg: &Msg) -> anyhow::Result<Bytes> {

@@ -2,8 +2,8 @@ use crate::{
     ConnectArgs, app_config,
     common::{ALPN, ConnectionStateWatcher},
     console::{
-        LocalConsole, Osc52Extractor, Role, StatusBarHandle, is_detach_key, render_local_screen,
-        window_change_signal,
+        LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, apply_scroll,
+        is_detach_key, is_sgr_mouse, render_local_screen, scroll_delta, window_change_signal,
     },
     protocol::{Msg, decode, encode},
 };
@@ -62,7 +62,11 @@ impl Helper {
 
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
-        let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(pty_rows, cols, 1000)));
+        let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(
+            pty_rows,
+            cols,
+            SCROLLBACK_LINES,
+        )));
         let statusbar_handle = StatusBarHandle::new(Role::Helper);
         let mut statusbar_rx = statusbar_handle.subscribe();
 
@@ -94,6 +98,38 @@ impl Helper {
 
                     if is_detach_key(&bytes) {
                         break Ok(());
+                    }
+
+                    let (alt, mouse_on, scrolled) = {
+                        let p = vt_parser.lock().unwrap();
+                        (
+                            p.screen().alternate_screen(),
+                            p.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None,
+                            p.screen().scrollback() > 0,
+                        )
+                    };
+
+                    if !alt {
+                        if let Some(delta) = scroll_delta(&bytes, pty_rows as i32) {
+                            let offset = apply_scroll(&vt_parser, delta);
+                            hub.send(Msg::ScrollTo { offset: offset as u32 }).await?;
+                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
+                            console.write_stdout(frame).await?;
+                            continue;
+                        }
+
+                        // Clicks/drag are now being reported too (we forced ?1000h). Only
+                        // forward them if the remote app actually enabled mouse handling.
+                        if is_sgr_mouse(&bytes) && !mouse_on {
+                            continue;
+                        }
+
+                        if scrolled {
+                            vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
+                            hub.send(Msg::ScrollTo { offset: 0 }).await?;
+                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
+                            console.write_stdout(frame).await?;
+                        }
                     }
 
                     hub.send(Msg::Data(bytes)).await?;
@@ -133,6 +169,11 @@ impl Helper {
                             statusbar_handle.set_connected(n);
                         },
                         Some(Msg::Resize {..}) => {},
+                        Some(Msg::ScrollTo { offset }) => {
+                            vt_parser.lock().unwrap().screen_mut().set_scrollback(offset as usize);
+                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
+                            console.write_stdout(frame).await?;
+                        }
                         None => break Err(anyhow!("channel closed")).context("Recv from victim"),
                     }
                 }
