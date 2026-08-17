@@ -10,25 +10,25 @@ Get a **remote rescue shell** over [magic-wormhole](https://github.com/magic-wor
 ## Quick Start
 
 ### 1. On the machine needing help:
-```bash
-curl -sL https://run.any64.de | bash
+```sh
+curl -sL https://run.any64.de | sh
 ```
 
 or directly from github:
-```bash
-curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | bash
+```sh
+curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | sh
 ```
 
 It will display a one-time code (e.g., `7-guitar-battery`).
 
 ### 2. On the machine helping:
-```bash
-curl -sL https://run.any64.de | bash -s -- connect
+```sh
+curl -sL https://run.any64.de | sh -s -- connect
 ```
 
 or directly from github:
-```bash
-curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | bash -s -- connect
+```sh
+curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | sh -s -- connect
 ```
 
 Enter the code when prompted. 
@@ -61,7 +61,7 @@ rescue-shell wormhole <args>     # full wormhole-rs cli version 0.8.1 included
 
 ## Build from Source
 
-```bash
+```sh
 git clone https://github.com/kernelPanic0x/rescue-shell
 cd rescue-shell
 cargo build --release
