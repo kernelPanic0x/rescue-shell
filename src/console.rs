@@ -416,17 +416,17 @@ impl Drop for LocalConsole {
 /// typed variant in termwiz (which models only the *request*), so the shell
 /// wire format is a named constant. WezTerm answers identically: Pp=1 (VT220),
 /// Pv=277 (xterm patch level -> fish enables ttymouse=sgr / 24-bit color).
-#[allow(unused)]
+#[cfg(unix)]
 const DA2_RESP: &[u8] = b"\x1b[>1;277;0c";
 
 /// Device Status Report reply. termwiz only knows the query `5n`; the answer
 /// "ready, no malfunction" must be emitted directly.
-#[allow(unused)]
+#[cfg(unix)]
 const DSR_OK_RESP: &[u8] = b"\x1b[0n";
 
 /// XTVERSION reply, a DCS sequence `ESC P >| <prog> <version> ESC \`.
 /// termwiz models `>q` as the request only; the response is the DCS body.
-#[allow(unused)]
+#[cfg(unix)]
 fn xtversion(program: &str, version: &str) -> Vec<u8> {
     format!("\x1bP>|{program} {version}\x1b\\").into_bytes()
 }
