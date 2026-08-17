@@ -98,19 +98,22 @@ can_execute_in() {
 }
 
 find_temp_dir() {
+    # Resolve current UID in a POSIX-compliant way
+    user_id="$(id -u 2>/dev/null || true)"
+
     for candidate in \
         "${TMPDIR:-}" \
-        "${HOME:+$HOME/.local/tmp}" \
-        "${HOME:+$HOME/.cache}" \
-        "/tmp" \
-        "/var/tmp" \
         "/dev/shm" \
+        "/run/shm" \
+        ${user_id:+"/run/user/${user_id}"} \
+        ${user_id:+"/var/run/user/${user_id}"} \
+        "/tmp" \
         "/data/local/tmp" \
+        "/var/tmp" \
         "${HOME:-}"; do
 
-        [ -n "$candidate" ] && [ ! -d "$candidate" ] && mkdir -p "$candidate" 2>/dev/null || true
-
-        if can_execute_in "$candidate"; then
+        # Only evaluate directories that already exist (never create folders)
+        if [ -n "$candidate" ] && [ -d "$candidate" ] && can_execute_in "$candidate"; then
             printf '%s' "${candidate%/}"
             return 0
         fi
