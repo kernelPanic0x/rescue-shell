@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -316,11 +316,21 @@ pub struct LocalConsole {
     stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
     stdout_tx: Option<mpsc::Sender<Bytes>>,
     stdout_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[cfg(windows)]
+    #[allow(unused)]
+    win_vt_input: winvt::Input,
 }
 
 impl LocalConsole {
     pub fn new() -> anyhow::Result<Self> {
-        LocalConsole::setup().context("Console setup")?;
+        enable_raw_mode()?;
+
+        #[cfg(windows)]
+        let win_vt_input = winvt::Input::enable()?;
+
+        let mut stdout = std::io::stdout();
+
+        execute!(stdout, EnterAlternateScreen)?;
 
         // Keyboard reader: blocking std::io::stdin() on a plain OS thread,
         // pushed into the channel that the async loop consumes.
@@ -357,20 +367,9 @@ impl LocalConsole {
             stdin_rx: tokio::sync::Mutex::new(stdin_rx),
             stdout_tx: Some(stdout_tx),
             stdout_handle: tokio::sync::Mutex::new(Some(stdout_handle)),
+            #[cfg(windows)]
+            win_vt_input,
         })
-    }
-
-    fn setup() -> anyhow::Result<()> {
-        enable_raw_mode()?;
-
-        #[cfg(windows)]
-        crate::console::enable_vt_input()?;
-
-        let mut stdout = std::io::stdout();
-
-        execute!(stdout, EnterAlternateScreen)?;
-
-        Ok(())
     }
 
     pub async fn read_stdin(&self) -> Option<Bytes> {
@@ -417,14 +416,17 @@ impl Drop for LocalConsole {
 /// typed variant in termwiz (which models only the *request*), so the shell
 /// wire format is a named constant. WezTerm answers identically: Pp=1 (VT220),
 /// Pv=277 (xterm patch level -> fish enables ttymouse=sgr / 24-bit color).
+#[allow(unused)]
 const DA2_RESP: &[u8] = b"\x1b[>1;277;0c";
 
 /// Device Status Report reply. termwiz only knows the query `5n`; the answer
 /// "ready, no malfunction" must be emitted directly.
+#[allow(unused)]
 const DSR_OK_RESP: &[u8] = b"\x1b[0n";
 
 /// XTVERSION reply, a DCS sequence `ESC P >| <prog> <version> ESC \`.
 /// termwiz models `>q` as the request only; the response is the DCS body.
+#[allow(unused)]
 fn xtversion(program: &str, version: &str) -> Vec<u8> {
     format!("\x1bP>|{program} {version}\x1b\\").into_bytes()
 }
@@ -578,26 +580,47 @@ impl Perform for Osc52Handler<'_> {
 }
 
 #[cfg(windows)]
-pub fn enable_vt_input() -> std::io::Result<()> {
+mod winvt {
+    use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::System::Console::{
         ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
         SetConsoleMode,
     };
 
-    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    let mut mode: u32 = 0;
-
-    if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
-        return Err(std::io::Error::last_os_error());
+    pub struct Input {
+        handle: HANDLE,
+        original_mode: u32,
     }
 
-    mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+    impl Input {
+        pub fn enable() -> std::io::Result<Self> {
+            let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+            let mut mode: u32 = 0;
 
-    if unsafe { SetConsoleMode(handle, mode) } == 0 {
-        return Err(std::io::Error::last_os_error());
+            if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            let original_mode = mode;
+
+            mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+
+            if unsafe { SetConsoleMode(handle, mode) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            Ok(Self {
+                handle,
+                original_mode,
+            })
+        }
     }
 
-    Ok(())
+    impl Drop for Input {
+        fn drop(&mut self) {
+            unsafe { SetConsoleMode(self.handle, self.original_mode) };
+        }
+    }
 }
 
 pub fn window_change_signal() -> mpsc::Receiver<()> {
