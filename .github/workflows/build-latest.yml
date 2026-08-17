@@ -35,6 +35,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # --- Linux (musl static) ---
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_zigbuild: true
@@ -50,16 +51,22 @@ jobs:
             use_zigbuild: true
             rustflags: ""
             ext: ""
+
+          # --- Android ---
           - target: aarch64-linux-android
             os: ubuntu-latest
             use_zigbuild: false
             rustflags: ""
             ext: ""
+
+          # --- FreeBSD ---
           - target: x86_64-unknown-freebsd
             os: ubuntu-latest
             use_zigbuild: true
             rustflags: ""
             ext: ""
+
+          # --- macOS ---
           - target: x86_64-apple-darwin
             os: macos-latest
             use_zigbuild: false
@@ -70,10 +77,11 @@ jobs:
             use_zigbuild: false
             rustflags: ""
             ext: ""
-          # --- Windows Targets ---
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            use_zigbuild: false
+
+          # --- Windows ---
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            use_zigbuild: true
             rustflags: ""
             ext: ".exe"
           - target: aarch64-pc-windows-msvc
