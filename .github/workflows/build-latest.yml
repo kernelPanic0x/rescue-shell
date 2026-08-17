@@ -79,15 +79,15 @@ jobs:
             ext: ""
 
           # --- Windows ---
-          - target: x86_64-pc-windows-gnu
-            os: ubuntu-latest
-            use_zigbuild: true
-            rustflags: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_zigbuild: false
+            rustflags: "-C target-feature=+crt-static"
             ext: ".exe"
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             use_zigbuild: false
-            rustflags: ""
+            rustflags: "-C target-feature=+crt-static"
             ext: ".exe"
 
     steps:
