@@ -163,7 +163,16 @@ impl Helper {
                         Some(Msg::ConnectedHelpers(n)) => {
                             statusbar_handle.set_connected(n);
                         },
-                        Some(Msg::Resize {..}) => {},
+                        Some(Msg::Resize {cols, rows}) => {
+                            let (our_max_cols, our_max_rows) = size()?;
+                            // cap victim size to max helper size
+                            if cols > our_max_cols {
+                                hub.send(Msg::Resize { cols: our_max_cols, rows  }).await?;
+                            }
+                            if rows > our_max_rows {
+                                hub.send(Msg::Resize { cols, rows: our_max_rows }).await?;
+                            }
+                        },
                         Some(Msg::ScrollTo { offset }) => {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(offset as usize);
                             console.render().await?;
