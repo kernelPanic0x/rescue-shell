@@ -320,6 +320,10 @@ impl LocalConsole {
         })
     }
 
+    pub fn force_redraw(&mut self) {
+        self.prev_screen = None;
+    }
+
     pub async fn render(&mut self) -> anyhow::Result<()> {
         let buf = {
             let mut parser = self.parser.lock().unwrap();
