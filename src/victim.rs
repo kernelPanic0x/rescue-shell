@@ -288,6 +288,8 @@ impl Victim {
                         }
                         Msg::Resize { cols, rows } => {
                             pty.resize(cols, rows)?;
+                            // ConPTY clears console on resize
+                            console.force_redraw();
                         }
                         Msg::Bye => {},
                         Msg::ConnectedHelpers(_) => {},
