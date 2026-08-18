@@ -58,8 +58,6 @@ pub struct Helper;
 
 impl Helper {
     pub async fn run(args: ConnectArgs) -> Result<()> {
-        let console = LocalConsole::new()?;
-
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
         let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(
@@ -81,6 +79,8 @@ impl Helper {
         .await?;
 
         let mut sigwinch = window_change_signal();
+
+        let console = LocalConsole::new()?;
 
         let res: Result<()> = loop {
             tokio::select! {

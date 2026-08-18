@@ -182,8 +182,6 @@ pub struct Victim {
 
 impl Victim {
     pub async fn run(args: ServeArgs) -> Result<()> {
-        let console = LocalConsole::new()?;
-
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
         let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(
@@ -201,6 +199,8 @@ impl Victim {
             HelperHub::start(args.clone(), statusbar_handle.clone(), vt_parser.clone()).await?;
 
         let mut sigwinch = window_change_signal();
+
+        let console = LocalConsole::new()?;
 
         let res: Result<()> = loop {
             tokio::select! {
