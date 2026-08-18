@@ -1,8 +1,7 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
     LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, apply_scroll,
-    is_detach_key, is_sgr_mouse, process_pty_output, render_local_screen, scroll_delta,
-    window_change_signal,
+    is_detach_key, is_sgr_mouse, process_pty_output, scroll_delta, window_change_signal,
 };
 use crate::protocol::Msg;
 use crate::protocol::{decode, encode};
@@ -200,15 +199,15 @@ impl Victim {
 
         let mut sigwinch = window_change_signal();
 
-        let console = LocalConsole::new()?;
+        let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
 
         let res: Result<()> = loop {
             tokio::select! {
                 // Statusbar update
                 _ = statusbar_rx.changed() => {
-                    let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                    console.write_stdout(frame).await?;
+                    console.render().await?;
 
+                    // TODO: move network update to seperate job
                     hub.broadcast(Msg::ConnectedHelpers(statusbar_handle.get_connected()));
                 }
 
@@ -231,8 +230,7 @@ impl Victim {
                         console.write_stdout(output).await?;
                     }
 
-                    let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                    console.write_stdout(frame).await?;
+                    console.render().await?;
 
                     hub.broadcast(Msg::Data(Bytes::from(bytes)));
                 }
@@ -257,8 +255,7 @@ impl Victim {
                         if let Some(delta) = scroll_delta(&bytes, pty_rows as i32) {
                             let offset = apply_scroll(&vt_parser, delta);
                             hub.broadcast(Msg::ScrollTo { offset: offset as u32 });
-                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                            console.write_stdout(frame).await?;
+                            console.render().await?;
                             continue;
                         }
 
@@ -269,8 +266,7 @@ impl Victim {
                         if scrolled {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
                             hub.broadcast(Msg::ScrollTo { offset: 0 });
-                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                            console.write_stdout(frame).await?;
+                            console.render().await?;
                         }
                     }
 
@@ -296,8 +292,7 @@ impl Victim {
                             // Rebroadcast so every helper (including the one that asked) converges.
                             hub.broadcast(Msg::ScrollTo { offset });
 
-                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                            console.write_stdout(frame).await?;
+                            console.render().await?;
                         }
                     }
                 }
@@ -312,8 +307,7 @@ impl Victim {
                         let _ = pty.resize(cols, pty_rows);
                         vt_parser.lock().unwrap().screen_mut().set_size(pty_rows, cols);
 
-                        let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                        console.write_stdout(frame).await?;
+                        console.render().await?;
                     }
                 }
 

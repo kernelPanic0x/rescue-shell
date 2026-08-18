@@ -16,7 +16,8 @@ use crossterm::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
     terminal::{
-        Clear, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+        enable_raw_mode,
     },
 };
 use magic_wormhole::Code;
@@ -247,66 +248,6 @@ impl StatusBarHandle {
     }
 }
 
-pub fn render_local_screen(
-    parser: Arc<Mutex<vt100::Parser>>,
-    status_bar: &StatusBarState,
-    cols: u16,
-    total_rows: u16,
-) -> Bytes {
-    let parser = parser.lock().unwrap();
-    let mut buf = Vec::new();
-    let screen = parser.screen();
-
-    // 1. Sync physical terminal input modes (DECCKM for arrow keys, mouse, etc.)
-    buf.extend_from_slice(&screen.input_mode_formatted());
-
-    // Override the remote app's mouse state on OUR physical terminal.
-    // Force SGR mouse reporting so the wheel arrives as ESC[<64/65;…M
-    // instead of being collapsed into Up/Down arrows by the terminal's
-    // alternate-screen scroll fallback. Must come AFTER input_mode_formatted().
-    buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
-
-    // 2. Draw status bar on physical Row 0
-    status_bar.render_to(&mut buf, cols);
-
-    // 3. Draw VT100 rows starting on physical Row 1
-    for (r, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
-        let physical_row = (r as u16) + 1;
-        if physical_row >= total_rows {
-            break;
-        }
-
-        // Move to row AND clear line to the right before drawing
-        let _ = queue!(
-            buf,
-            MoveTo(0, physical_row),
-            SetAttribute(crossterm::style::Attribute::Reset),
-            Clear(crossterm::terminal::ClearType::UntilNewLine)
-        );
-        buf.extend_from_slice(&row_bytes);
-    }
-
-    // 4. Move terminal cursor to virtual cursor position (live view only)
-    let scrolled = screen.scrollback() > 0;
-    if !scrolled {
-        let (cur_r, cur_c) = screen.cursor_position();
-        let _ = queue!(
-            buf,
-            SetAttribute(crossterm::style::Attribute::Reset),
-            MoveTo(cur_c, cur_r + 1)
-        );
-    }
-
-    // 5. Cursor visibility: hide while scrolled back
-    if scrolled || screen.hide_cursor() {
-        let _ = queue!(buf, Hide);
-    } else {
-        let _ = queue!(buf, Show);
-    }
-
-    Bytes::from(buf)
-}
-
 pub fn is_detach_key(bytes: &[u8]) -> bool {
     // Ctrl+] (0x1D) detaches locally
     bytes.contains(&0x1d)
@@ -316,21 +257,23 @@ pub struct LocalConsole {
     stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
     stdout_tx: Option<mpsc::Sender<Bytes>>,
     stdout_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+
     #[cfg(windows)]
     #[allow(unused)]
     win_vt_input: winvt::Input,
+
+    parser: Arc<Mutex<vt100::Parser>>,
+    prev_screen: Option<vt100::Screen>,
+    statusbar_rx: watch::Receiver<StatusBarState>,
 }
 
 impl LocalConsole {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(
+        current_parser: Arc<Mutex<vt100::Parser>>,
+        statusbar_handle: &StatusBarHandle,
+    ) -> anyhow::Result<Self> {
         enable_raw_mode()?;
-
-        #[cfg(windows)]
-        let win_vt_input = winvt::Input::enable()?;
-
-        let mut stdout = std::io::stdout();
-
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(std::io::stdout(), EnterAlternateScreen)?;
 
         // Keyboard reader: blocking std::io::stdin() on a plain OS thread,
         // pushed into the channel that the async loop consumes.
@@ -345,7 +288,7 @@ impl LocalConsole {
                             .blocking_send(Bytes::copy_from_slice(&buf[..n]))
                             .is_err()
                         {
-                            break; // loop ended -> stop reading
+                            break;
                         }
                     }
                 }
@@ -367,9 +310,88 @@ impl LocalConsole {
             stdin_rx: tokio::sync::Mutex::new(stdin_rx),
             stdout_tx: Some(stdout_tx),
             stdout_handle: tokio::sync::Mutex::new(Some(stdout_handle)),
+
             #[cfg(windows)]
-            win_vt_input,
+            win_vt_input: winvt::Input::enable()?,
+
+            parser: current_parser,
+            prev_screen: None,
+            statusbar_rx: statusbar_handle.subscribe(),
         })
+    }
+
+    pub async fn render(&mut self) -> anyhow::Result<()> {
+        let buf = {
+            let mut parser = self.parser.lock().unwrap();
+            let screen = parser.screen_mut();
+            let (_rows, cols) = screen.size();
+            let size_changed = match &self.prev_screen {
+                Some(s) => screen.size() != s.size(),
+                None => true,
+            };
+            let scrolled = screen.scrollback() > 0;
+            let statusbar = self.statusbar_rx.borrow();
+            let mut buf = Vec::new();
+
+            // 1. Render status bar on physical Row 0
+            statusbar.render_to(&mut buf, cols);
+
+            // 2. Render screen contents (Full redraw vs. Diff)
+            if size_changed || self.prev_screen.is_none() {
+                buf.extend_from_slice(&screen.input_mode_formatted());
+                buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
+
+                for (r, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
+                    let physical_row = (r as u16) + 1;
+
+                    let _ = queue!(
+                        buf,
+                        MoveTo(0, physical_row),
+                        SetAttribute(Attribute::Reset),
+                        Clear(ClearType::UntilNewLine)
+                    );
+
+                    buf.extend_from_slice(&row_bytes);
+                }
+            } else if let Some(s) = &self.prev_screen {
+                let input_diff = screen.input_mode_diff(s);
+                if !input_diff.is_empty() {
+                    buf.extend_from_slice(&input_diff);
+                    buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
+                }
+
+                for (r, diff_bytes) in screen.rows_diff(s, 0, cols).enumerate() {
+                    if !diff_bytes.is_empty() {
+                        let physical_row = (r as u16) + 1;
+                        let _ = queue!(buf, MoveTo(0, physical_row));
+                        buf.extend_from_slice(&diff_bytes);
+                        let _ = queue!(buf, SetAttribute(Attribute::Reset));
+                    }
+                }
+            }
+
+            // Move physical cursor to virtual shell cursor position
+            if !scrolled {
+                let (cur_r, cur_c) = screen.cursor_position();
+                let _ = queue!(
+                    buf,
+                    SetAttribute(Attribute::Reset),
+                    MoveTo(cur_c, cur_r + 1)
+                );
+            }
+
+            if scrolled || screen.hide_cursor() {
+                let _ = queue!(buf, Hide);
+            } else {
+                let _ = queue!(buf, Show);
+            }
+
+            self.prev_screen = Some(screen.clone());
+
+            Bytes::from(buf)
+        };
+
+        self.write_stdout(buf).await
     }
 
     pub async fn read_stdin(&self) -> Option<Bytes> {

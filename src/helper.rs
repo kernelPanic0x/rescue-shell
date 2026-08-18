@@ -3,7 +3,7 @@ use crate::{
     common::{ALPN, ConnectionStateWatcher},
     console::{
         LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, apply_scroll,
-        is_detach_key, is_sgr_mouse, render_local_screen, scroll_delta, window_change_signal,
+        is_detach_key, is_sgr_mouse, scroll_delta, window_change_signal,
     },
     protocol::{Msg, decode, encode},
 };
@@ -80,14 +80,13 @@ impl Helper {
 
         let mut sigwinch = window_change_signal();
 
-        let console = LocalConsole::new()?;
+        let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
 
         let res: Result<()> = loop {
             tokio::select! {
                 // Status bar update -> render frame locally
                 _ = statusbar_rx.changed() => {
-                    let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                    console.write_stdout(frame).await?;
+                    console.render().await?;
                 }
 
                 // Raw stdin bytes -> filter -> send to victim
@@ -113,8 +112,7 @@ impl Helper {
                         if let Some(delta) = scroll_delta(&bytes, pty_rows as i32) {
                             let offset = apply_scroll(&vt_parser, delta);
                             hub.send(Msg::ScrollTo { offset: offset as u32 }).await?;
-                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                            console.write_stdout(frame).await?;
+                            console.render().await?;
                             continue;
                         }
 
@@ -127,8 +125,7 @@ impl Helper {
                         if scrolled {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
                             hub.send(Msg::ScrollTo { offset: 0 }).await?;
-                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                            console.write_stdout(frame).await?;
+                            console.render().await?;
                         }
                     }
 
@@ -147,8 +144,7 @@ impl Helper {
                         // Notify victim shell of new dimensions
                         hub.send(Msg::Resize { cols: new_cols, rows: pty_rows }).await?;
 
-                        let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                        console.write_stdout(frame).await?;
+                        console.render().await?;
                     }
                 }
 
@@ -161,8 +157,7 @@ impl Helper {
                             }
 
                             vt_parser.lock().unwrap().process(&bytes);
-                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                            console.write_stdout(frame).await?;
+                            console.render().await?;
                         }
                         Some(Msg::Bye) => break Ok(()),
                         Some(Msg::ConnectedHelpers(n)) => {
@@ -171,8 +166,7 @@ impl Helper {
                         Some(Msg::Resize {..}) => {},
                         Some(Msg::ScrollTo { offset }) => {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(offset as usize);
-                            let frame = render_local_screen(vt_parser.clone(), &statusbar_rx.borrow(), cols, rows);
-                            console.write_stdout(frame).await?;
+                            console.render().await?;
                         }
                         None => break Err(anyhow!("channel closed")).context("Recv from victim"),
                     }
