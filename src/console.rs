@@ -92,14 +92,14 @@ impl StatusBarState {
 
         let (net_str, net_fg) = match self.internet_state {
             InternetState::Online(ping) => {
-                let symbol = if is_utf8 { "●" } else { "[+]" };
+                let symbol = if is_utf8 { "●" } else { "[*]" };
                 (
                     format!("{symbol} Online ({} ms)", ping.as_millis()),
                     Color::Green,
                 )
             }
             InternetState::Offline => {
-                let symbol = if is_utf8 { "×" } else { "[-]" };
+                let symbol = if is_utf8 { "×" } else { "[!]" };
                 (format!("{symbol} Offline"), Color::Red)
             }
         };
