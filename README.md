@@ -56,8 +56,8 @@ rescue-shell wormhole <args>     # full wormhole-rs cli version 0.8.1 included
 | Google Pixel 7a (Termux) | ✅ |
 | Arch Linux | ✅ |
 | macOS | ⏳ not yet |
-| Windows | ⏳ not yet |
-| TrueNAS/FreeBSD 14+ | ⏳ not yet |
+| Windows 11 | ✅ |
+| FreeBSD 14+ | ⏳ not yet |
 
 ## Build from Source
 
