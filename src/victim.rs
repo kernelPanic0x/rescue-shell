@@ -200,6 +200,7 @@ impl Victim {
         let mut sigwinch = window_change_signal();
 
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
+        let mut old_connected = 0;
 
         let res: Result<()> = loop {
             tokio::select! {
@@ -207,8 +208,12 @@ impl Victim {
                 _ = statusbar_rx.changed() => {
                     console.render().await?;
 
-                    // TODO: move network update to seperate job
-                    hub.broadcast(Msg::ConnectedHelpers(statusbar_handle.get_connected()));
+                    // only send network updates on actual var change
+                    let current_connected = statusbar_handle.get_connected();
+                    if current_connected != old_connected {
+                        hub.broadcast(Msg::ConnectedHelpers(current_connected));
+                        old_connected = current_connected;
+                    }
                 }
 
                 // Shell output -> Mirror locally AND send to Helpers
