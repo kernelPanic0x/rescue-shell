@@ -320,6 +320,7 @@ impl LocalConsole {
         })
     }
 
+    #[cfg(windows)]
     pub fn force_redraw(&mut self) {
         self.prev_screen = None;
     }
