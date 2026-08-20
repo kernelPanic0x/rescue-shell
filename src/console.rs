@@ -365,7 +365,6 @@ impl LocalConsole {
             // 2. Render screen contents (Full redraw vs. Diff)
             if size_changed || self.prev_screen.is_none() {
                 buf.extend_from_slice(&screen.input_mode_formatted());
-                buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
 
                 for (r, row_bytes) in screen.rows_formatted(0, screen_cols).enumerate() {
                     let physical_row = (r as u16) + 1;
@@ -840,6 +839,45 @@ fn sgr_wheel_delta(bytes: &[u8], lines: i32) -> Option<i32> {
 
 pub fn is_sgr_mouse(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x1b[<") && matches!(bytes.last(), Some(b'M') | Some(b'm'))
+}
+
+/// Adjusts SGR mouse coordinates by subtracting `row_offset` (e.g., 1 for the status bar).
+///
+/// Returns:
+/// - `Some(adjusted_bytes)`: The modified SGR sequence to send to the PTY.
+/// - `None`: If the click landed on the status bar (should be dropped).
+pub fn translate_sgr_mouse(bytes: &[u8], row_offset: u16) -> Option<Bytes> {
+    // SGR mouse format: \x1b[<BUTTON;COL;ROW(M|m)
+    if !bytes.starts_with(b"\x1b[<") {
+        return Some(Bytes::copy_from_slice(bytes));
+    }
+
+    let s = std::str::from_utf8(bytes).ok()?;
+    let last_char = s.chars().last()?;
+    if last_char != 'M' && last_char != 'm' {
+        return Some(Bytes::copy_from_slice(bytes));
+    }
+
+    let inner = &s[3..s.len() - 1]; // Strip "\x1b[<" and trailing "M"/"m"
+    let mut parts = inner.split(';');
+
+    let btn = parts.next()?;
+    let col = parts.next()?;
+    let row: u16 = parts.next()?.parse().ok()?;
+
+    if parts.next().is_some() {
+        return Some(Bytes::copy_from_slice(bytes));
+    }
+
+    // If the click is on the status bar (Row <= row_offset), drop it
+    if row <= row_offset {
+        return None;
+    }
+
+    let adjusted_row = row - row_offset;
+    Some(Bytes::from(format!(
+        "\x1b[<{btn};{col};{adjusted_row}{last_char}"
+    )))
 }
 
 struct HelperLifetime {

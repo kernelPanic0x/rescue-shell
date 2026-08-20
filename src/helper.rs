@@ -3,7 +3,7 @@ use crate::{
     common::{ALPN, ConnectionStateWatcher},
     console::{
         LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, apply_scroll,
-        is_detach_key, is_sgr_mouse, scroll_delta, window_change_signal,
+        is_detach_key, is_sgr_mouse, scroll_delta, translate_sgr_mouse, window_change_signal,
     },
     protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim},
 };
@@ -137,7 +137,18 @@ impl Helper {
                         }
                     }
 
-                    hub.send(ToVictim::Data(bytes)).await?;
+
+                    // Adjust mouse coordinates if this is an SGR mouse event
+                    let adjusted = if is_sgr_mouse(&bytes) {
+                        match translate_sgr_mouse(&bytes, 1) {
+                            Some(adjusted) => adjusted,
+                            None => continue, // Clicked on status bar: drop it
+                        }
+                    } else {
+                        bytes
+                    };
+
+                    hub.send(ToVictim::Data(adjusted)).await?;
                 }
 
                 // Window resize signal (SIGWINCH)
