@@ -1,9 +1,10 @@
 use std::{
     borrow::Cow,
+    collections::HashMap,
     fmt,
     io::{Read, Write},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::anyhow;
@@ -21,8 +22,13 @@ use crossterm::{
     },
 };
 use magic_wormhole::Code;
-use tokio::sync::{mpsc, watch};
+use tokio::{
+    sync::{mpsc, watch},
+    time::sleep,
+};
 use vte::{Params, Perform};
+
+use crate::protocol::{TIMEOUT, TerminalSize};
 
 pub const SCROLLBACK_LINES: usize = 1000;
 
@@ -194,6 +200,8 @@ impl StatusBarHandle {
 
         let tx_clone = tx.clone();
         tokio::spawn(async move {
+            sleep(Duration::from_secs(3)).await;
+
             // Adjust scroll speed here (e.g. 300ms per character step)
             let mut interval = tokio::time::interval(Duration::from_millis(300));
             loop {
@@ -264,6 +272,7 @@ pub struct LocalConsole {
 
     parser: Arc<Mutex<vt100::Parser>>,
     prev_screen: Option<vt100::Screen>,
+    prev_physical_size: Option<(u16, u16)>,
     statusbar_rx: watch::Receiver<StatusBarState>,
 }
 
@@ -316,47 +325,115 @@ impl LocalConsole {
 
             parser: current_parser,
             prev_screen: None,
+            prev_physical_size: None,
             statusbar_rx: statusbar_handle.subscribe(),
         })
     }
 
-    #[cfg(windows)]
-    pub fn force_redraw(&mut self) {
-        self.prev_screen = None;
-    }
-
     pub async fn render(&mut self) -> anyhow::Result<()> {
+        let (phys_cols, phys_rows) = crossterm::terminal::size()?;
+
         let buf = {
             let mut parser = self.parser.lock().unwrap();
             let screen = parser.screen_mut();
-            let (_rows, cols) = screen.size();
-            let size_changed = match &self.prev_screen {
-                Some(s) => screen.size() != s.size(),
-                None => true,
+            let (screen_rows, screen_cols) = screen.size();
+
+            // Trigger full redraw if either virtual VT size OR physical terminal dimensions change
+            let size_changed = match (&self.prev_screen, self.prev_physical_size) {
+                (Some(s), Some(prev_phys)) => {
+                    screen.size() != s.size() || (phys_cols, phys_rows) != prev_phys
+                }
+                _ => true,
             };
+
             let scrolled = screen.scrollback() > 0;
             let statusbar = self.statusbar_rx.borrow();
             let mut buf = Vec::new();
 
-            // 1. Render status bar on physical Row 0
-            statusbar.render_to(&mut buf, cols);
+            // 1. Render status bar across the FULL PHYSICAL width on Row 0
+            statusbar.render_to(&mut buf, phys_cols);
+
+            let is_utf8 = supports_unicode();
+            let v_border = if is_utf8 { "│" } else { "|" };
+            let h_border = if is_utf8 { '─' } else { '-' };
+            let corner_border = if is_utf8 { "┘" } else { "+" };
+            let border_fg = Color::DarkGrey;
+
+            let has_right_border = phys_cols > screen_cols;
+            let has_bottom_border = phys_rows > screen_rows + 1;
 
             // 2. Render screen contents (Full redraw vs. Diff)
             if size_changed || self.prev_screen.is_none() {
                 buf.extend_from_slice(&screen.input_mode_formatted());
                 buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
 
-                for (r, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
+                for (r, row_bytes) in screen.rows_formatted(0, screen_cols).enumerate() {
                     let physical_row = (r as u16) + 1;
+                    if physical_row >= phys_rows {
+                        break;
+                    }
 
                     let _ = queue!(
                         buf,
                         MoveTo(0, physical_row),
+                        ResetColor,
                         SetAttribute(Attribute::Reset),
                         Clear(ClearType::UntilNewLine)
                     );
 
                     buf.extend_from_slice(&row_bytes);
+
+                    // Draw vertical right border and clear margin with default background
+                    if has_right_border {
+                        let _ = queue!(
+                            buf,
+                            MoveTo(screen_cols, physical_row),
+                            ResetColor,
+                            SetForegroundColor(border_fg),
+                            SetAttribute(Attribute::NormalIntensity),
+                            Print(v_border),
+                            ResetColor,
+                            Clear(ClearType::UntilNewLine)
+                        );
+                    }
+                }
+
+                // Draw horizontal bottom border (tmux style)
+                if has_bottom_border {
+                    let border_row = screen_rows + 1;
+                    let h_line: String =
+                        std::iter::repeat_n(h_border, screen_cols as usize).collect();
+
+                    let _ = queue!(
+                        buf,
+                        MoveTo(0, border_row),
+                        ResetColor,
+                        SetForegroundColor(border_fg),
+                        SetAttribute(Attribute::NormalIntensity),
+                        Print(h_line)
+                    );
+
+                    if has_right_border {
+                        let _ = queue!(
+                            buf,
+                            Print(corner_border),
+                            ResetColor,
+                            Clear(ClearType::UntilNewLine)
+                        );
+                    } else {
+                        let _ = queue!(buf, ResetColor, Clear(ClearType::UntilNewLine));
+                    }
+
+                    // Clear any remaining lines below the bottom border
+                    for r in (border_row + 1)..phys_rows {
+                        let _ = queue!(
+                            buf,
+                            MoveTo(0, r),
+                            ResetColor,
+                            SetAttribute(Attribute::Reset),
+                            Clear(ClearType::UntilNewLine)
+                        );
+                    }
                 }
             } else if let Some(s) = &self.prev_screen {
                 let input_diff = screen.input_mode_diff(s);
@@ -365,12 +442,31 @@ impl LocalConsole {
                     buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
                 }
 
-                for (r, diff_bytes) in screen.rows_diff(s, 0, cols).enumerate() {
+                for (r, diff_bytes) in screen.rows_diff(s, 0, screen_cols).enumerate() {
                     if !diff_bytes.is_empty() {
                         let physical_row = (r as u16) + 1;
+                        if physical_row >= phys_rows {
+                            break;
+                        }
+
                         let _ = queue!(buf, MoveTo(0, physical_row));
                         buf.extend_from_slice(&diff_bytes);
-                        let _ = queue!(buf, SetAttribute(Attribute::Reset));
+
+                        // Reset active colors, repaint the right border, and clear the margin
+                        if has_right_border {
+                            let _ = queue!(
+                                buf,
+                                MoveTo(screen_cols, physical_row),
+                                ResetColor,
+                                SetForegroundColor(border_fg),
+                                SetAttribute(Attribute::NormalIntensity),
+                                Print(v_border),
+                                ResetColor,
+                                Clear(ClearType::UntilNewLine)
+                            );
+                        } else {
+                            let _ = queue!(buf, ResetColor, SetAttribute(Attribute::Reset));
+                        }
                     }
                 }
             }
@@ -378,10 +474,13 @@ impl LocalConsole {
             // Move physical cursor to virtual shell cursor position
             if !scrolled {
                 let (cur_r, cur_c) = screen.cursor_position();
+                let target_c = cur_c.min(screen_cols.saturating_sub(1));
+                let target_r = (cur_r + 1).min(phys_rows.saturating_sub(1));
                 let _ = queue!(
                     buf,
+                    ResetColor,
                     SetAttribute(Attribute::Reset),
-                    MoveTo(cur_c, cur_r + 1)
+                    MoveTo(target_c, target_r)
                 );
             }
 
@@ -392,6 +491,7 @@ impl LocalConsole {
             }
 
             self.prev_screen = Some(screen.clone());
+            self.prev_physical_size = Some((phys_cols, phys_rows));
 
             Bytes::from(buf)
         };
@@ -740,4 +840,64 @@ fn sgr_wheel_delta(bytes: &[u8], lines: i32) -> Option<i32> {
 
 pub fn is_sgr_mouse(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x1b[<") && matches!(bytes.last(), Some(b'M') | Some(b'm'))
+}
+
+#[derive(Default)]
+struct TerminalSizeLifetime {
+    size: TerminalSize,
+    deadline: Option<Instant>,
+}
+
+impl TerminalSizeLifetime {
+    fn is_alive(&self) -> bool {
+        match self.deadline {
+            Some(d) => Instant::now() < d,
+            None => true,
+        }
+    }
+}
+
+impl From<TerminalSize> for TerminalSizeLifetime {
+    fn from(value: TerminalSize) -> Self {
+        Self {
+            size: value,
+            deadline: Some(Instant::now() + TIMEOUT),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct TerminalSizeNegotiator {
+    sizes: HashMap<u64, TerminalSizeLifetime>,
+}
+
+impl TerminalSizeNegotiator {
+    pub fn negotiate_static(&mut self, id: u64, static_size: TerminalSize) -> Option<TerminalSize> {
+        self.sizes.insert(
+            id,
+            TerminalSizeLifetime {
+                size: static_size,
+                deadline: None,
+            },
+        );
+        self.sizes.retain(|_, t| t.is_alive());
+        self.sizes
+            .values()
+            .map(|t| t.size)
+            .reduce(|acc, s| acc.min_dimensions(s))
+    }
+
+    /// Get the best terminal size with all connected helpers
+    pub fn negotiate(&mut self, id: u64, size: TerminalSize) -> Option<TerminalSize> {
+        self.sizes.insert(id, size.into());
+        self.sizes.retain(|_, t| t.is_alive());
+        self.sizes
+            .values()
+            .map(|t| t.size)
+            .reduce(|acc, s| acc.min_dimensions(s))
+    }
+
+    pub fn remove_id(&mut self, id: u64) {
+        self.sizes.remove(&id);
+    }
 }

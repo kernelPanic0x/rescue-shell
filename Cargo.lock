@@ -3725,6 +3725,7 @@ dependencies = [
  "crossterm 0.29.0",
  "dialoguer",
  "futures",
+ "getrandom 0.4.3",
  "hex",
  "iroh",
  "libc",

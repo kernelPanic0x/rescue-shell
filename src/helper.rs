@@ -5,7 +5,7 @@ use crate::{
         LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, apply_scroll,
         is_detach_key, is_sgr_mouse, scroll_delta, window_change_signal,
     },
-    protocol::{Msg, decode, encode},
+    protocol::{Msg, TIMEOUT, TerminalSize, decode, encode},
 };
 use anyhow::{Context, Result, anyhow};
 use crossterm::terminal::size;
@@ -58,6 +58,7 @@ pub struct Helper;
 
 impl Helper {
     pub async fn run(args: ConnectArgs) -> Result<()> {
+        let own_id = getrandom::u64()?;
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
         let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(
@@ -72,18 +73,25 @@ impl Helper {
         let hub = VictimHub::connect(args, statusbar_handle.clone()).await?;
 
         // Send initial terminal dimensions to victim shell
-        hub.send(Msg::Resize {
-            cols,
-            rows: pty_rows,
+        hub.send(Msg::SizeHint {
+            id: own_id,
+            size: TerminalSize { cols, pty_rows },
         })
         .await?;
 
         let mut sigwinch = window_change_signal();
+        let mut screen_size_resend =
+            tokio::time::interval(Duration::from_secs((TIMEOUT / 2).as_secs()));
 
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
 
         let res: Result<()> = loop {
             tokio::select! {
+                // Peroidically resend term size to keep TermSizeNegotiator alive
+                _ = screen_size_resend.tick() => {
+                    hub.send(Msg::SizeHint { id: own_id, size: TerminalSize { cols, pty_rows } }).await?;
+                }
+
                 // Status bar update -> render frame locally
                 _ = statusbar_rx.changed() => {
                     console.render().await?;
@@ -138,13 +146,7 @@ impl Helper {
                         cols = new_cols;
                         rows = new_rows;
                         pty_rows = rows.saturating_sub(1).max(1);
-
-                        vt_parser.lock().unwrap().screen_mut().set_size(pty_rows, cols);
-
-                        // Notify victim shell of new dimensions
-                        hub.send(Msg::Resize { cols: new_cols, rows: pty_rows }).await?;
-
-                        console.render().await?;
+                        hub.send(Msg::SizeHint {id: own_id, size: TerminalSize { cols, pty_rows}}).await?;
                     }
                 }
 
@@ -159,20 +161,18 @@ impl Helper {
                             vt_parser.lock().unwrap().process(&bytes);
                             console.render().await?;
                         }
-                        Some(Msg::Bye) => break Ok(()),
+                        Some(Msg::Bye{..}) => break Ok(()),
                         Some(Msg::ConnectedHelpers(n)) => {
                             statusbar_handle.set_connected(n);
                         },
-                        Some(Msg::Resize {cols, rows}) => {
-                            let (our_max_cols, our_max_rows) = size()?;
-                            // cap victim size to max helper size
-                            if cols > our_max_cols {
-                                hub.send(Msg::Resize { cols: our_max_cols, rows  }).await?;
-                            }
-                            if rows > our_max_rows {
-                                hub.send(Msg::Resize { cols, rows: our_max_rows }).await?;
-                            }
+                        Some(Msg::SetSize(size)) => {
+                            // Negotiated size from victim
+                            vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
+                            console.render().await?;
+                            // TODO: draw border if screen size < term size
                         },
+                        // Ignore, size hints can't come from victim
+                        Some(Msg::SizeHint{..}) => {}
                         Some(Msg::ScrollTo { offset }) => {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(offset as usize);
                             console.render().await?;
@@ -183,7 +183,7 @@ impl Helper {
             }
         };
 
-        let _ = hub.send(Msg::Bye).await;
+        let _ = hub.send(Msg::Bye { id: own_id }).await;
         hub.shutdown().await;
         console.flush_and_close().await;
 

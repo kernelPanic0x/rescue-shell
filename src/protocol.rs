@@ -1,5 +1,9 @@
+use std::time::Duration;
+
 use bytes::Bytes;
 use wincode::{SchemaRead, SchemaWrite};
+
+pub const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every message on the wire. The wormhole channel is already
 /// message-framed (send/receive Vec<u8>), so we just bincode-encode.
@@ -10,14 +14,18 @@ pub enum Msg {
     /// victim→helper: shell output for the screen.
     Data(Bytes),
 
-    /// Helper's terminal size changed (or initial size on connect).
-    Resize {
-        cols: u16,
-        rows: u16,
+    /// Helper request a new size
+    SizeHint {
+        id: u64,
+        size: TerminalSize,
     },
+    /// Negotiated size
+    SetSize(TerminalSize),
 
     /// Graceful shutdown either direction.
-    Bye,
+    Bye {
+        id: u64,
+    },
 
     ConnectedHelpers(u8),
 
@@ -27,6 +35,21 @@ pub enum Msg {
     ScrollTo {
         offset: u32,
     },
+}
+
+#[derive(SchemaWrite, SchemaRead, Debug, Clone, Copy, Default)]
+pub struct TerminalSize {
+    pub cols: u16,
+    pub pty_rows: u16,
+}
+
+impl TerminalSize {
+    pub fn min_dimensions(self, other: Self) -> Self {
+        TerminalSize {
+            cols: self.cols.min(other.cols),
+            pty_rows: self.pty_rows.min(other.pty_rows),
+        }
+    }
 }
 
 pub fn encode(msg: &Msg) -> anyhow::Result<Bytes> {

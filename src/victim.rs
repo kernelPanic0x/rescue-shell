@@ -1,9 +1,10 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
-    LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, apply_scroll,
-    is_detach_key, is_sgr_mouse, process_pty_output, scroll_delta, window_change_signal,
+    LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, TerminalSizeNegotiator,
+    apply_scroll, is_detach_key, is_sgr_mouse, process_pty_output, scroll_delta,
+    window_change_signal,
 };
-use crate::protocol::Msg;
+use crate::protocol::{Msg, TIMEOUT, TerminalSize};
 use crate::protocol::{decode, encode};
 use crate::{ServeArgs, app_config};
 use anyhow::{Context, Result, anyhow};
@@ -20,6 +21,7 @@ use magic_wormhole::{Code, MailboxConnection, Wormhole};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::codec::LengthDelimitedCodec;
@@ -148,10 +150,10 @@ impl PtySession {
         self.to_pty_tx.send(bytes).await.map_err(|e| anyhow!(e))
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+    pub fn resize(&self, size: TerminalSize) -> Result<()> {
         self.master.resize(PtySize {
-            rows,
-            cols,
+            rows: size.pty_rows,
+            cols: size.cols,
             pixel_width: 0,
             pixel_height: 0,
         })?;
@@ -181,8 +183,11 @@ pub struct Victim {
 
 impl Victim {
     pub async fn run(args: ServeArgs) -> Result<()> {
+        let own_id = getrandom::u64()?;
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
+        let mut size_negotiator = TerminalSizeNegotiator::default();
+        size_negotiator.negotiate_static(own_id, TerminalSize { cols, pty_rows });
         let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(
             pty_rows,
             cols,
@@ -198,12 +203,23 @@ impl Victim {
             HelperHub::start(args.clone(), statusbar_handle.clone(), vt_parser.clone()).await?;
 
         let mut sigwinch = window_change_signal();
+        let mut screen_size_resend =
+            tokio::time::interval(Duration::from_secs((TIMEOUT / 2).as_secs()));
 
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
         let mut old_connected = 0;
 
         let res: Result<()> = loop {
             tokio::select! {
+                // Peroidically resend term size
+                _ = screen_size_resend.tick() => {
+                    let size = size_negotiator.negotiate_static(own_id, TerminalSize { cols, pty_rows }).expect("At least victim's size");
+                    vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
+                    pty.resize(size)?;
+                    console.render().await?;
+                    hub.broadcast(Msg::SetSize(size));
+                }
+
                 // Statusbar update
                 _ = statusbar_rx.changed() => {
                     console.render().await?;
@@ -286,14 +302,23 @@ impl Victim {
                                 pty.write_input(bytes).await?;
                             }
                         }
-                        Msg::Resize { cols, rows } => {
-                            pty.resize(cols, rows)?;
-
-                            // ConPTY clears console on resize
-                            #[cfg(windows)]
-                            console.force_redraw();
+                        Msg::SizeHint { id, size } => {
+                            let size = size_negotiator.negotiate(id, size).expect("At least victim's size");
+                            vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
+                            pty.resize(size)?;
+                            console.render().await?;
+                            hub.broadcast(Msg::SetSize(size));
                         }
-                        Msg::Bye => {},
+                        // Ignore on victim side, only victim can force size
+                        Msg::SetSize(_) => {},
+                        Msg::Bye{id} => {
+                            size_negotiator.remove_id(id);
+                            let size = size_negotiator.negotiate_static(own_id, TerminalSize{cols, pty_rows}).expect("At least victim's size");
+                            vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
+                            pty.resize(size)?;
+                            console.render().await?;
+                            hub.broadcast(Msg::SetSize(size));
+                        },
                         Msg::ConnectedHelpers(_) => {},
                         Msg::ScrollTo { offset } => {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(offset as usize);
@@ -306,15 +331,17 @@ impl Victim {
                     }
                 }
 
-                // Window resized locally -> update PTY & VT Parser
+                // Window resized locally -> VT Parser
                 _ = sigwinch.recv() => {
                     if let Ok((new_cols, new_rows)) = size() {
                         cols = new_cols;
                         rows = new_rows;
                         pty_rows = rows.saturating_sub(1).max(1);
 
-                        let _ = pty.resize(cols, pty_rows);
-                        vt_parser.lock().unwrap().screen_mut().set_size(pty_rows, cols);
+                        let size = size_negotiator.negotiate_static(own_id, TerminalSize { cols, pty_rows }).expect("At least victim's size");
+                        vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
+                        pty.resize(size)?;
+                        hub.broadcast(Msg::SetSize(size));
 
                         console.render().await?;
                     }
@@ -330,7 +357,7 @@ impl Victim {
             }
         };
 
-        hub.broadcast(Msg::Bye);
+        hub.broadcast(Msg::Bye { id: own_id });
         hub.shutdown().await;
         console.flush_and_close().await;
 
