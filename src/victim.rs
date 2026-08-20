@@ -8,7 +8,8 @@ use crate::protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim};
 use crate::{ServeArgs, app_config};
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
-use crossterm::terminal::size;
+use crossterm::queue;
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, size};
 use futures::{SinkExt, StreamExt};
 use iroh::PublicKey;
 use iroh::{
@@ -458,12 +459,20 @@ impl ProtocolHandler for Protocol {
         let mut raw_reader =
             tokio_util::codec::FramedRead::new(decoder, LengthDelimitedCodec::new());
 
-        let initial_state = {
-            let parser = self.vt_parser.lock().unwrap();
-            Bytes::from(parser.screen().state_formatted())
+        let mut initial_state = Vec::new();
+
+        // Check if term is in alternate screen mode and sync it with helper
+        let is_alternate_screen = self.vt_parser.lock().unwrap().screen().alternate_screen();
+        if is_alternate_screen {
+            queue!(initial_state, EnterAlternateScreen).expect("writing to Vec is infallible");
+        } else {
+            queue!(initial_state, LeaveAlternateScreen).expect("writing to Vec is infallible");
         };
 
-        if let Ok(encoded) = ToHelper::Data(initial_state).encode() {
+        // Send complete screen to sync state
+        initial_state.extend_from_slice(&self.vt_parser.lock().unwrap().screen().state_formatted());
+
+        if let Ok(encoded) = ToHelper::Data(Bytes::from(initial_state)).encode() {
             let _ = raw_writer.send(encoded).await;
         }
 
