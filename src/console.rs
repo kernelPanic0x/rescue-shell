@@ -268,7 +268,7 @@ pub struct LocalConsole {
 
     #[cfg(windows)]
     #[allow(unused)]
-    win_vt_input: winvt::Input,
+    win_vt_input: winvt::ConsoleHandle,
 
     parser: Arc<Mutex<vt100::Parser>>,
     prev_screen: Option<vt100::Screen>,
@@ -321,7 +321,7 @@ impl LocalConsole {
             stdout_handle: tokio::sync::Mutex::new(Some(stdout_handle)),
 
             #[cfg(windows)]
-            win_vt_input: winvt::Input::enable()?,
+            win_vt_input: winvt::ConsoleHandle::new()?.enable_virtual_terminal_input()?,
 
             parser: current_parser,
             prev_screen: None,
@@ -709,29 +709,21 @@ impl Perform for Osc52Handler<'_> {
 mod winvt {
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::System::Console::{
-        ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
-        SetConsoleMode,
+        CONSOLE_MODE, ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode, GetStdHandle,
+        STD_INPUT_HANDLE, SetConsoleMode,
     };
 
-    pub struct Input {
+    pub struct ConsoleHandle {
         handle: HANDLE,
-        original_mode: u32,
+        original_mode: CONSOLE_MODE,
     }
 
-    impl Input {
-        pub fn enable() -> std::io::Result<Self> {
+    impl ConsoleHandle {
+        pub fn new() -> std::io::Result<Self> {
             let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-            let mut mode: u32 = 0;
+            let mut original_mode: CONSOLE_MODE = 0;
 
-            if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            let original_mode = mode;
-
-            mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
-
-            if unsafe { SetConsoleMode(handle, mode) } == 0 {
+            if unsafe { GetConsoleMode(handle, &mut original_mode) } == 0 {
                 return Err(std::io::Error::last_os_error());
             }
 
@@ -740,9 +732,25 @@ mod winvt {
                 original_mode,
             })
         }
+
+        pub fn enable_virtual_terminal_input(self) -> std::io::Result<Self> {
+            let mut mode: CONSOLE_MODE = 0;
+
+            if unsafe { GetConsoleMode(self.handle, &mut mode) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+
+            if unsafe { SetConsoleMode(self.handle, mode) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            Ok(self)
+        }
     }
 
-    impl Drop for Input {
+    impl Drop for ConsoleHandle {
         fn drop(&mut self) {
             unsafe { SetConsoleMode(self.handle, self.original_mode) };
         }
