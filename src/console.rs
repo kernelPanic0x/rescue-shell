@@ -28,7 +28,7 @@ use tokio::{
 };
 use vte::{Params, Perform};
 
-use crate::protocol::{TIMEOUT, TerminalSize};
+use crate::protocol::{HelperId, TIMEOUT, TerminalSize};
 
 pub const SCROLLBACK_LINES: usize = 1000;
 
@@ -842,62 +842,56 @@ pub fn is_sgr_mouse(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x1b[<") && matches!(bytes.last(), Some(b'M') | Some(b'm'))
 }
 
-#[derive(Default)]
-struct TerminalSizeLifetime {
+struct HelperLifetime {
     size: TerminalSize,
-    deadline: Option<Instant>,
+    deadline: Instant,
 }
 
-impl TerminalSizeLifetime {
-    fn is_alive(&self) -> bool {
-        match self.deadline {
-            Some(d) => Instant::now() < d,
-            None => true,
-        }
-    }
-}
-
-impl From<TerminalSize> for TerminalSizeLifetime {
-    fn from(value: TerminalSize) -> Self {
-        Self {
-            size: value,
-            deadline: Some(Instant::now() + TIMEOUT),
-        }
-    }
-}
-
-#[derive(Default)]
 pub struct TerminalSizeNegotiator {
-    sizes: HashMap<u64, TerminalSizeLifetime>,
+    local_size: TerminalSize,
+    helpers: HashMap<HelperId, HelperLifetime>,
 }
 
 impl TerminalSizeNegotiator {
-    pub fn negotiate_static(&mut self, id: u64, static_size: TerminalSize) -> Option<TerminalSize> {
-        self.sizes.insert(
+    pub fn new(local_size: TerminalSize) -> Self {
+        Self {
+            local_size,
+            helpers: HashMap::new(),
+        }
+    }
+
+    /// Update local window size
+    pub fn update_local(&mut self, size: TerminalSize) -> TerminalSize {
+        self.local_size = size;
+        self.best_size()
+    }
+
+    /// Update or insert a remote helper's size hint
+    pub fn update_helper(&mut self, id: HelperId, size: TerminalSize) -> TerminalSize {
+        self.helpers.insert(
             id,
-            TerminalSizeLifetime {
-                size: static_size,
-                deadline: None,
+            HelperLifetime {
+                size,
+                deadline: Instant::now() + TIMEOUT,
             },
         );
-        self.sizes.retain(|_, t| t.is_alive());
-        self.sizes
-            .values()
-            .map(|t| t.size)
-            .reduce(|acc, s| acc.min_dimensions(s))
+        self.best_size()
     }
 
-    /// Get the best terminal size with all connected helpers
-    pub fn negotiate(&mut self, id: u64, size: TerminalSize) -> Option<TerminalSize> {
-        self.sizes.insert(id, size.into());
-        self.sizes.retain(|_, t| t.is_alive());
-        self.sizes
-            .values()
-            .map(|t| t.size)
-            .reduce(|acc, s| acc.min_dimensions(s))
+    /// Remove a helper that disconnected
+    pub fn remove_helper(&mut self, id: HelperId) -> TerminalSize {
+        self.helpers.remove(&id);
+        self.best_size()
     }
 
-    pub fn remove_id(&mut self, id: u64) {
-        self.sizes.remove(&id);
+    /// Calculate the minimum size across local terminal and all active helpers
+    pub fn best_size(&mut self) -> TerminalSize {
+        let now = Instant::now();
+        self.helpers.retain(|_, h| now < h.deadline);
+
+        self.helpers
+            .values()
+            .map(|h| h.size)
+            .fold(self.local_size, |acc, s| acc.min_dimensions(s))
     }
 }

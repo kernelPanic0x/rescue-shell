@@ -1,40 +1,17 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use wincode::{SchemaRead, SchemaWrite};
+use wincode::{Deserialize, SchemaRead, SchemaWrite, Serialize};
 
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Every message on the wire. The wormhole channel is already
-/// message-framed (send/receive Vec<u8>), so we just bincode-encode.
-#[derive(SchemaWrite, SchemaRead, Debug, Clone)]
-pub enum Msg {
-    /// Terminal bytes. Direction depends on context:
-    /// helper→victim: keystrokes for the PTY.
-    /// victim→helper: shell output for the screen.
-    Data(Bytes),
+#[derive(SchemaWrite, SchemaRead, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HelperId(pub u64);
 
-    /// Helper request a new size
-    SizeHint {
-        id: u64,
-        size: TerminalSize,
-    },
-    /// Negotiated size
-    SetSize(TerminalSize),
-
-    /// Graceful shutdown either direction.
-    Bye {
-        id: u64,
-    },
-
-    ConnectedHelpers(u8),
-
-    /// Authoritative scrollback viewport offset.
-    /// `0` = live screen; `n` = n lines scrolled back (older content).
-    /// Sent helper -> victim as a request, victim -> helpers as the synced state.
-    ScrollTo {
-        offset: u32,
-    },
+impl From<u64> for HelperId {
+    fn from(value: u64) -> Self {
+        HelperId(value)
+    }
 }
 
 #[derive(SchemaWrite, SchemaRead, Debug, Clone, Copy, Default)]
@@ -52,10 +29,39 @@ impl TerminalSize {
     }
 }
 
-pub fn encode(msg: &Msg) -> anyhow::Result<Bytes> {
-    Ok(Bytes::from(wincode::serialize(msg)?))
+pub trait Encoder: Sized {
+    fn encode(&self) -> anyhow::Result<Bytes>;
+    fn decode(bytes: &[u8]) -> anyhow::Result<Self>;
 }
 
-pub fn decode(bytes: &[u8]) -> anyhow::Result<Msg> {
-    Ok(wincode::deserialize(bytes)?)
+impl<T> Encoder for T
+where
+    T: Serialize<Src = T> + for<'de> Deserialize<'de, Dst = T>,
+{
+    fn encode(&self) -> anyhow::Result<Bytes> {
+        let serialized = wincode::serialize(self)?;
+        Ok(Bytes::from(serialized))
+    }
+
+    fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        let msg = wincode::deserialize(bytes)?;
+        Ok(msg)
+    }
+}
+
+#[derive(SchemaWrite, SchemaRead, Debug, Clone)]
+pub enum ToVictim {
+    Data(Bytes),
+    SizeHint { id: HelperId, size: TerminalSize },
+    Bye { id: HelperId },
+    RequestScrollTo { offset: u32 },
+}
+
+#[derive(SchemaWrite, SchemaRead, Debug, Clone)]
+pub enum ToHelper {
+    Data(Bytes),
+    SetSize(TerminalSize),
+    Bye,
+    ConnectedHelpers(u8),
+    ScrollTo { offset: u32 },
 }

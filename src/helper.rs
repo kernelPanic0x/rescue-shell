@@ -5,7 +5,7 @@ use crate::{
         LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, apply_scroll,
         is_detach_key, is_sgr_mouse, scroll_delta, window_change_signal,
     },
-    protocol::{Msg, TIMEOUT, TerminalSize, decode, encode},
+    protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim},
 };
 use anyhow::{Context, Result, anyhow};
 use crossterm::terminal::size;
@@ -20,16 +20,16 @@ use tokio::{io::BufReader, sync::mpsc, time::timeout};
 use tokio_util::codec::LengthDelimitedCodec;
 
 pub struct VictimHub {
-    to_victim_tx: mpsc::Sender<Msg>,
-    from_victim_rx: tokio::sync::Mutex<mpsc::Receiver<Msg>>,
+    to_victim_tx: mpsc::Sender<ToVictim>,
+    from_victim_rx: tokio::sync::Mutex<mpsc::Receiver<ToHelper>>,
     #[allow(unused)]
     link: Link,
 }
 
 impl VictimHub {
     pub async fn connect(args: ConnectArgs, statusbar_handle: StatusBarHandle) -> Result<Self> {
-        let (to_victim_tx, to_victim_rx) = mpsc::channel::<Msg>(64);
-        let (from_victim_tx, from_victim_rx) = mpsc::channel::<Msg>(64);
+        let (to_victim_tx, to_victim_rx) = mpsc::channel::<ToVictim>(64);
+        let (from_victim_tx, from_victim_rx) = mpsc::channel::<ToHelper>(64);
 
         let link = Link::connect(args, statusbar_handle, to_victim_rx, from_victim_tx).await?;
 
@@ -40,11 +40,11 @@ impl VictimHub {
         })
     }
 
-    pub async fn send(&self, msg: Msg) -> Result<()> {
+    pub async fn send(&self, msg: ToVictim) -> Result<()> {
         self.to_victim_tx.send(msg).await.map_err(|e| anyhow!(e))
     }
 
-    pub async fn recv(&self) -> Option<Msg> {
+    pub async fn recv(&self) -> Option<ToHelper> {
         self.from_victim_rx.lock().await.recv().await
     }
 
@@ -58,7 +58,7 @@ pub struct Helper;
 
 impl Helper {
     pub async fn run(args: ConnectArgs) -> Result<()> {
-        let own_id = getrandom::u64()?;
+        let id = getrandom::u64()?.into();
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
         let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(
@@ -73,8 +73,8 @@ impl Helper {
         let hub = VictimHub::connect(args, statusbar_handle.clone()).await?;
 
         // Send initial terminal dimensions to victim shell
-        hub.send(Msg::SizeHint {
-            id: own_id,
+        hub.send(ToVictim::SizeHint {
+            id,
             size: TerminalSize { cols, pty_rows },
         })
         .await?;
@@ -89,7 +89,7 @@ impl Helper {
             tokio::select! {
                 // Peroidically resend term size to keep TermSizeNegotiator alive
                 _ = screen_size_resend.tick() => {
-                    hub.send(Msg::SizeHint { id: own_id, size: TerminalSize { cols, pty_rows } }).await?;
+                    hub.send(ToVictim::SizeHint { id, size: TerminalSize { cols, pty_rows } }).await?;
                 }
 
                 // Status bar update -> render frame locally
@@ -119,7 +119,7 @@ impl Helper {
                     if !alt {
                         if let Some(delta) = scroll_delta(&bytes, pty_rows as i32) {
                             let offset = apply_scroll(&vt_parser, delta);
-                            hub.send(Msg::ScrollTo { offset: offset as u32 }).await?;
+                            hub.send(ToVictim::RequestScrollTo { offset: offset as u32 }).await?;
                             console.render().await?;
                             continue;
                         }
@@ -132,12 +132,12 @@ impl Helper {
 
                         if scrolled {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
-                            hub.send(Msg::ScrollTo { offset: 0 }).await?;
+                            hub.send(ToVictim::RequestScrollTo { offset: 0 }).await?;
                             console.render().await?;
                         }
                     }
 
-                    hub.send(Msg::Data(bytes)).await?;
+                    hub.send(ToVictim::Data(bytes)).await?;
                 }
 
                 // Window resize signal (SIGWINCH)
@@ -146,14 +146,14 @@ impl Helper {
                         cols = new_cols;
                         rows = new_rows;
                         pty_rows = rows.saturating_sub(1).max(1);
-                        hub.send(Msg::SizeHint {id: own_id, size: TerminalSize { cols, pty_rows}}).await?;
+                        hub.send(ToVictim::SizeHint { id, size: TerminalSize { cols, pty_rows}} ).await?;
                     }
                 }
 
                 // Victim output -> feed into local VT parser & render screen
                 incoming = hub.recv() => {
                     match incoming {
-                        Some(Msg::Data(bytes)) => {
+                        Some(ToHelper::Data(bytes)) => {
                             if let Some(output) = osc52_extractor.extract(&bytes) {
                                 console.write_stdout(output).await?;
                             }
@@ -161,19 +161,17 @@ impl Helper {
                             vt_parser.lock().unwrap().process(&bytes);
                             console.render().await?;
                         }
-                        Some(Msg::Bye{..}) => break Ok(()),
-                        Some(Msg::ConnectedHelpers(n)) => {
+                        Some(ToHelper::Bye) => break Ok(()),
+                        Some(ToHelper::ConnectedHelpers(n)) => {
                             statusbar_handle.set_connected(n);
                         },
-                        Some(Msg::SetSize(size)) => {
+                        Some(ToHelper::SetSize(size)) => {
                             // Negotiated size from victim
                             vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
                             console.render().await?;
                             // TODO: draw border if screen size < term size
                         },
-                        // Ignore, size hints can't come from victim
-                        Some(Msg::SizeHint{..}) => {}
-                        Some(Msg::ScrollTo { offset }) => {
+                        Some(ToHelper::ScrollTo { offset }) => {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(offset as usize);
                             console.render().await?;
                         }
@@ -183,7 +181,7 @@ impl Helper {
             }
         };
 
-        let _ = hub.send(Msg::Bye { id: own_id }).await;
+        let _ = hub.send(ToVictim::Bye { id }).await;
         hub.shutdown().await;
         console.flush_and_close().await;
 
@@ -200,8 +198,8 @@ impl Link {
     async fn connect(
         args: ConnectArgs,
         statusbar_handle: StatusBarHandle,
-        mut to_victim_rx: mpsc::Receiver<Msg>,
-        from_victim_tx: mpsc::Sender<Msg>,
+        mut to_victim_rx: mpsc::Receiver<ToVictim>,
+        from_victim_tx: mpsc::Sender<ToHelper>,
     ) -> anyhow::Result<Self> {
         let mailbox = MailboxConnection::connect(
             app_config(&args.common),
@@ -249,7 +247,7 @@ impl Link {
         let victim_helper = tokio::spawn(async move {
             loop {
                 let bytes = raw_reader.next().await.ok_or(anyhow!("reader is none"))??;
-                let msg = decode(&bytes)?;
+                let msg = ToHelper::decode(&bytes)?;
                 from_victim_tx.send(msg).await?;
             }
 
@@ -266,7 +264,7 @@ impl Link {
                     .ok_or(anyhow!("channel closed"))
                     .context("Helper to victim")?;
 
-                raw_writer.send(encode(&msg)?).await?;
+                raw_writer.send(msg.encode()?).await?;
             }
 
             #[allow(unreachable_code)]

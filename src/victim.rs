@@ -4,8 +4,7 @@ use crate::console::{
     apply_scroll, is_detach_key, is_sgr_mouse, process_pty_output, scroll_delta,
     window_change_signal,
 };
-use crate::protocol::{Msg, TIMEOUT, TerminalSize};
-use crate::protocol::{decode, encode};
+use crate::protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim};
 use crate::{ServeArgs, app_config};
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
@@ -27,8 +26,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::codec::LengthDelimitedCodec;
 
 pub struct HelperHub {
-    to_helpers: broadcast::Sender<Msg>,
-    from_helpers_rx: tokio::sync::Mutex<mpsc::Receiver<Msg>>,
+    to_helpers: broadcast::Sender<ToHelper>,
+    from_helpers_rx: tokio::sync::Mutex<mpsc::Receiver<ToVictim>>,
     #[allow(unused)]
     link: Link,
 }
@@ -61,11 +60,11 @@ impl HelperHub {
         })
     }
 
-    pub fn broadcast(&self, msg: Msg) {
+    pub fn broadcast(&self, msg: ToHelper) {
         let _ = self.to_helpers.send(msg);
     }
 
-    pub async fn recv(&self) -> Option<Msg> {
+    pub async fn recv(&self) -> Option<ToVictim> {
         self.from_helpers_rx.lock().await.recv().await
     }
 
@@ -183,11 +182,9 @@ pub struct Victim {
 
 impl Victim {
     pub async fn run(args: ServeArgs) -> Result<()> {
-        let own_id = getrandom::u64()?;
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
-        let mut size_negotiator = TerminalSizeNegotiator::default();
-        size_negotiator.negotiate_static(own_id, TerminalSize { cols, pty_rows });
+        let mut size_negotiator = TerminalSizeNegotiator::new(TerminalSize { cols, pty_rows });
         let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(
             pty_rows,
             cols,
@@ -213,11 +210,11 @@ impl Victim {
             tokio::select! {
                 // Peroidically resend term size
                 _ = screen_size_resend.tick() => {
-                    let size = size_negotiator.negotiate_static(own_id, TerminalSize { cols, pty_rows }).expect("At least victim's size");
+                    let size = size_negotiator.update_local(TerminalSize { cols, pty_rows });
                     vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
                     pty.resize(size)?;
                     console.render().await?;
-                    hub.broadcast(Msg::SetSize(size));
+                    hub.broadcast(ToHelper::SetSize(size));
                 }
 
                 // Statusbar update
@@ -227,7 +224,7 @@ impl Victim {
                     // only send network updates on actual var change
                     let current_connected = statusbar_handle.get_connected();
                     if current_connected != old_connected {
-                        hub.broadcast(Msg::ConnectedHelpers(current_connected));
+                        hub.broadcast(ToHelper::ConnectedHelpers(current_connected));
                         old_connected = current_connected;
                     }
                 }
@@ -253,7 +250,7 @@ impl Victim {
 
                     console.render().await?;
 
-                    hub.broadcast(Msg::Data(Bytes::from(bytes)));
+                    hub.broadcast(ToHelper::Data(Bytes::from(bytes)));
                 }
 
                 // Victim local typing -> Send to PTY
@@ -275,7 +272,7 @@ impl Victim {
                     if !alt {
                         if let Some(delta) = scroll_delta(&bytes, pty_rows as i32) {
                             let offset = apply_scroll(&vt_parser, delta);
-                            hub.broadcast(Msg::ScrollTo { offset: offset as u32 });
+                            hub.broadcast(ToHelper::ScrollTo { offset: offset as u32 });
                             console.render().await?;
                             continue;
                         }
@@ -286,7 +283,7 @@ impl Victim {
 
                         if scrolled {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
-                            hub.broadcast(Msg::ScrollTo { offset: 0 });
+                            hub.broadcast(ToHelper::ScrollTo { offset: 0 });
                             console.render().await?;
                         }
                     }
@@ -297,34 +294,31 @@ impl Victim {
                 // Remote messages from Helper -> Send to PTY / Resize
                 Some(msg) = hub.recv() => {
                     match msg {
-                        Msg::Data(bytes) => {
+                        ToVictim::Data(bytes) => {
                             if !args.read_only_helper {
                                 pty.write_input(bytes).await?;
                             }
                         }
-                        Msg::SizeHint { id, size } => {
-                            let size = size_negotiator.negotiate(id, size).expect("At least victim's size");
+                        ToVictim::SizeHint { id, size } => {
+                            let size = size_negotiator.update_helper(id, size);
                             vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
                             pty.resize(size)?;
                             console.render().await?;
-                            hub.broadcast(Msg::SetSize(size));
+                            hub.broadcast(ToHelper::SetSize(size));
                         }
-                        // Ignore on victim side, only victim can force size
-                        Msg::SetSize(_) => {},
-                        Msg::Bye{id} => {
-                            size_negotiator.remove_id(id);
-                            let size = size_negotiator.negotiate_static(own_id, TerminalSize{cols, pty_rows}).expect("At least victim's size");
+                        ToVictim::Bye{id} => {
+                            size_negotiator.remove_helper(id);
+                            let size = size_negotiator.update_local(TerminalSize{cols, pty_rows});
                             vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
                             pty.resize(size)?;
                             console.render().await?;
-                            hub.broadcast(Msg::SetSize(size));
+                            hub.broadcast(ToHelper::SetSize(size));
                         },
-                        Msg::ConnectedHelpers(_) => {},
-                        Msg::ScrollTo { offset } => {
+                        ToVictim::RequestScrollTo { offset } => {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(offset as usize);
 
                             // Rebroadcast so every helper (including the one that asked) converges.
-                            hub.broadcast(Msg::ScrollTo { offset });
+                            hub.broadcast(ToHelper::ScrollTo { offset });
 
                             console.render().await?;
                         }
@@ -338,10 +332,10 @@ impl Victim {
                         rows = new_rows;
                         pty_rows = rows.saturating_sub(1).max(1);
 
-                        let size = size_negotiator.negotiate_static(own_id, TerminalSize { cols, pty_rows }).expect("At least victim's size");
+                        let size = size_negotiator.update_local(TerminalSize { cols, pty_rows });
                         vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
                         pty.resize(size)?;
-                        hub.broadcast(Msg::SetSize(size));
+                        hub.broadcast(ToHelper::SetSize(size));
 
                         console.render().await?;
                     }
@@ -357,7 +351,7 @@ impl Victim {
             }
         };
 
-        hub.broadcast(Msg::Bye { id: own_id });
+        hub.broadcast(ToHelper::Bye);
         hub.shutdown().await;
         console.flush_and_close().await;
 
@@ -384,8 +378,8 @@ impl Drop for StatusBarClientsGuard {
 
 struct Protocol {
     allowed_peers: Option<Vec<PublicKey>>,
-    from_helper: mpsc::Sender<Msg>,
-    to_helpers: broadcast::Sender<Msg>,
+    from_helper: mpsc::Sender<ToVictim>,
+    to_helpers: broadcast::Sender<ToHelper>,
     statusbar_handle: StatusBarHandle,
     vt_parser: Arc<Mutex<vt100::Parser>>,
 }
@@ -393,8 +387,8 @@ struct Protocol {
 impl Protocol {
     fn new(
         args: &ServeArgs,
-        to_helpers: broadcast::Sender<Msg>,
-        from_helper: mpsc::Sender<Msg>,
+        to_helpers: broadcast::Sender<ToHelper>,
+        from_helper: mpsc::Sender<ToVictim>,
         statusbar_handle: StatusBarHandle,
         vt_parser: Arc<Mutex<vt100::Parser>>,
     ) -> anyhow::Result<Self> {
@@ -469,14 +463,14 @@ impl ProtocolHandler for Protocol {
             Bytes::from(parser.screen().state_formatted())
         };
 
-        if let Ok(encoded) = encode(&Msg::Data(initial_state)) {
+        if let Ok(encoded) = ToHelper::Data(initial_state).encode() {
             let _ = raw_writer.send(encoded).await;
         }
 
         let helper_victim = tokio::spawn(async move {
             loop {
                 let bytes = raw_reader.next().await.ok_or(anyhow!("reader is none"))??;
-                let msg = decode(&bytes)?;
+                let msg = ToVictim::decode(&bytes)?;
                 from_helper.send(msg).await?;
             }
 
@@ -487,7 +481,7 @@ impl ProtocolHandler for Protocol {
         let victim_helper = tokio::spawn(async move {
             loop {
                 let msg = to_helpers.recv().await?;
-                raw_writer.send(encode(&msg)?).await?;
+                raw_writer.send(msg.encode()?).await?;
             }
 
             #[allow(unreachable_code)]
