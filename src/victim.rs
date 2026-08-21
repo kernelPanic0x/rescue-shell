@@ -431,12 +431,6 @@ impl std::fmt::Debug for Protocol {
 
 impl ProtocolHandler for Protocol {
     async fn accept(&self, c: Connection) -> Result<(), AcceptError> {
-        if c.alpn() != ALPN {
-            return Err(AcceptError::NotAllowed {
-                meta: n0_error::Meta::default(),
-            });
-        }
-
         if let Some(ref allowed) = self.allowed_peers
             && !allowed.contains(&c.remote_id())
         {
