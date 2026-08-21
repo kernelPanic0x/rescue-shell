@@ -8,6 +8,7 @@ use crate::{
     protocol::{Encoder, HandshakePayload, HelperId, TIMEOUT, TerminalSize, ToHelper, ToVictim},
 };
 use anyhow::{Context, Result, anyhow};
+use bytes::Bytes;
 use crossterm::terminal::size;
 use futures::{SinkExt, StreamExt};
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey, endpoint::presets};
@@ -135,7 +136,7 @@ impl Helper {
                         console.render().await?;
                     }
 
-                    hub.send(ToVictim::Data(pty_bytes)).await?;
+                    hub.send(ToVictim::Data(Bytes::from(pty_bytes))).await?;
                 }
 
                 // Window resize signal (SIGWINCH)

@@ -811,58 +811,85 @@ pub enum LocalEvent {
 
 pub struct StdinProcessor {
     parser: vte::Parser,
-    handler: StdinHandler,
+    performer: StdinPerformer,
+    saw_escape: bool,
 }
 
 impl StdinProcessor {
     pub fn new(page_size: i32) -> Self {
         Self {
             parser: vte::Parser::new(),
-            handler: StdinHandler::new(1, page_size),
+            performer: StdinPerformer {
+                row_offset: 1,
+                alt_screen: false,
+                mouse_on: false,
+                page_size,
+                events: Vec::new(),
+                pty_output: Vec::new(),
+            },
+            saw_escape: false,
         }
     }
 
     pub fn set_state(&mut self, alt_screen: bool, mouse_on: bool, page_size: i32) {
-        self.handler.alt_screen = alt_screen;
-        self.handler.mouse_on = mouse_on;
-        self.handler.page_size = page_size;
+        self.performer.alt_screen = alt_screen;
+        self.performer.mouse_on = mouse_on;
+        self.performer.page_size = page_size;
     }
 
-    /// Process a stream chunk and return (local_events, bytes_to_forward_to_pty)
-    pub fn process(&mut self, input: &[u8]) -> (Vec<LocalEvent>, Bytes) {
-        self.parser.advance(&mut self.handler, input);
-        let events = std::mem::take(&mut self.handler.events);
-        let pty_bytes = self.handler.pty_output.split().freeze();
+    pub fn process(&mut self, incoming: &[u8]) -> (Vec<LocalEvent>, Vec<u8>) {
+        self.performer.events.clear();
+        self.performer.pty_output.clear();
 
-        (events, pty_bytes)
-    }
-}
+        for &byte in incoming {
+            // Fix for 0x7F (DEL) which VT500 standard ignores silently:
+            if byte == 0x7f {
+                if self.saw_escape {
+                    // terminal sent \x1b\x7f (e.g. Alt+Backspace / Ctrl+Backspace)
+                    // Reset parser back to Ground state and forward \x1b\x7f
+                    self.parser = vte::Parser::new();
+                    self.performer.pty_output.extend_from_slice(b"\x1b\x7f");
+                    self.saw_escape = false;
+                } else {
+                    // Regular Backspace (DEL / 0x7F)
+                    self.performer.pty_output.push(0x7f);
+                }
+                continue;
+            }
 
-struct StdinHandler {
-    row_offset: u16,
-    page_size: i32,
-    mouse_on: bool,
-    alt_screen: bool,
+            // Track if single \x1b was seen to handle \x1b\x7f streaming across chunks
+            if byte == 0x1b {
+                if self.saw_escape {
+                    // Double escape: flush first escape to PTY
+                    self.performer.pty_output.push(0x1b);
+                }
+                self.saw_escape = true;
+                self.parser.advance(&mut self.performer, &[byte]);
+                continue;
+            }
 
-    // Outputs collected per batch
-    events: Vec<LocalEvent>,
-    pty_output: BytesMut,
-}
-
-impl StdinHandler {
-    fn new(row_offset: u16, page_size: i32) -> Self {
-        Self {
-            row_offset,
-            page_size,
-            mouse_on: false,
-            alt_screen: false,
-            events: Vec::new(),
-            pty_output: BytesMut::new(),
+            self.saw_escape = false;
+            // Let vte stream-tokenize everything else safely
+            self.parser.advance(&mut self.performer, &[byte]);
         }
+
+        (
+            std::mem::take(&mut self.performer.events),
+            std::mem::take(&mut self.performer.pty_output),
+        )
     }
 }
 
-impl Perform for StdinHandler {
+pub struct StdinPerformer {
+    pub row_offset: u16,
+    pub alt_screen: bool,
+    pub mouse_on: bool,
+    pub page_size: i32,
+    pub events: Vec<LocalEvent>,
+    pub pty_output: Vec<u8>,
+}
+
+impl Perform for StdinPerformer {
     // 1. Regular character typing
     fn print(&mut self, c: char) {
         let mut buf = [0u8; 4];
@@ -870,14 +897,13 @@ impl Perform for StdinHandler {
             .extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
     }
 
-    // 2. Control characters (Ctrl+C, \r, \n, \t, etc.)
+    // 2. Control characters (Ctrl+C, \r, \n, \t, Ctrl+H, etc.)
     fn execute(&mut self, byte: u8) {
-        // Detach sequence: Ctrl+] (0x1D) or Ctrl+Q (0x11), adapt to your `is_detach_key`
         if byte == 0x1d {
             self.events.push(LocalEvent::Detach);
             return;
         }
-        self.pty_output.extend_from_slice(&[byte]);
+        self.pty_output.push(byte);
     }
 
     // 3. CSI Sequences (Mouse, Arrow keys, PageUp/Down, etc.)
@@ -916,36 +942,32 @@ impl Perform for StdinHandler {
         }
 
         // --- SGR MOUSE EVENTS: CSI < btn ; col ; row (M|m) ---
-        if intermediates == b"<"
-            && (action == 'M' || action == 'm')
-            && let [Some(&[btn]), Some(&[col]), Some(&[row])] = [
-                params.iter().next(),
-                params.iter().nth(1),
-                params.iter().nth(2),
-            ]
-        {
-            // SGR Wheel Scroll (64: wheel up, 65: wheel down) on press ('M')
-            if !self.alt_screen && action == 'M' && (btn == 64 || btn == 65) {
-                let delta = if btn == 64 { 3 } else { -3 };
-                self.events.push(LocalEvent::Scroll(delta));
+        if intermediates == b"<" && (action == 'M' || action == 'm') {
+            let mut it = params.iter();
+            if let (Some(&[btn]), Some(&[col]), Some(&[row])) = (it.next(), it.next(), it.next()) {
+                // SGR Wheel Scroll (64: wheel up, 65: wheel down) on press ('M')
+                if !self.alt_screen && action == 'M' && (btn == 64 || btn == 65) {
+                    let delta = if btn == 64 { 3 } else { -3 };
+                    self.events.push(LocalEvent::Scroll(delta));
+                    return;
+                }
+
+                // If remote application didn't enable mouse, discard mouse sequences in main screen
+                if !self.alt_screen && !self.mouse_on {
+                    return;
+                }
+
+                // Discard click if it hits the status bar
+                if row <= self.row_offset {
+                    return;
+                }
+
+                // Adjust row offset and forward to PTY
+                let adjusted_row = row - self.row_offset;
+                let seq = format!("\x1b[<{btn};{col};{adjusted_row}{action}");
+                self.pty_output.extend_from_slice(seq.as_bytes());
                 return;
             }
-
-            // If remote application didn't enable mouse, discard mouse sequences in main screen
-            if !self.alt_screen && !self.mouse_on {
-                return;
-            }
-
-            // Discard click if it hits the status bar
-            if row <= self.row_offset {
-                return;
-            }
-
-            // Adjust row offset and forward to PTY
-            let adjusted_row = row - self.row_offset;
-            let seq = format!("\x1b[<{btn};{col};{adjusted_row}{action}");
-            self.pty_output.extend_from_slice(seq.as_bytes());
-            return;
         }
 
         // --- FALLBACK: Forward any unhandled CSI sequence to PTY ---
@@ -974,9 +996,9 @@ impl Perform for StdinHandler {
 
     // 4. Escape sequences (e.g. Alt+keys)
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
-        self.pty_output.extend_from_slice(b"\x1b");
+        self.pty_output.push(0x1b);
         self.pty_output.extend_from_slice(intermediates);
-        self.pty_output.extend_from_slice(&[byte]);
+        self.pty_output.push(byte);
     }
 }
 

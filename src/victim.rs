@@ -305,7 +305,7 @@ impl Victim {
                         console.render().await?;
                     }
 
-                    pty.write_input(pty_bytes).await?;
+                    pty.write_input(Bytes::from(pty_bytes)).await?;
                 }
 
                 // Remote messages from Helper -> Send to PTY / Resize
