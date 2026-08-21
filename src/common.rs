@@ -5,8 +5,7 @@ use tokio::time::sleep;
 
 use crate::console::StatusBarHandle;
 
-pub const ALPN: &[u8] =
-    concat!("/", env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")).as_bytes();
+pub const ALPN: &[u8] = concat!("/", env!("CARGO_PKG_NAME"), "/").as_bytes();
 
 pub struct ConnectionStateWatcher {
     endpoint: Endpoint,

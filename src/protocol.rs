@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
 use wincode::{Deserialize, SchemaRead, SchemaWrite, Serialize};
@@ -64,4 +64,11 @@ pub enum ToHelper {
     Bye,
     ConnectedHelpers(u8),
     ScrollTo { offset: u32 },
+}
+
+#[derive(SchemaWrite, SchemaRead)]
+pub struct HandshakePayload {
+    pub public_key: [u8; 32],
+    pub relay_url: Option<String>,
+    pub direct_addresses: Vec<SocketAddr>,
 }

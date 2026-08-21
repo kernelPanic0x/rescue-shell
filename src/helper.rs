@@ -5,12 +5,12 @@ use crate::{
         LocalConsole, LocalEvent, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle,
         StdinProcessor, window_change_signal,
     },
-    protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim},
+    protocol::{Encoder, HandshakePayload, HelperId, TIMEOUT, TerminalSize, ToHelper, ToVictim},
 };
 use anyhow::{Context, Result, anyhow};
 use crossterm::terminal::size;
 use futures::{SinkExt, StreamExt};
-use iroh::{Endpoint, PublicKey, SecretKey, endpoint::presets};
+use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey, endpoint::presets};
 use magic_wormhole::{MailboxConnection, Wormhole};
 use std::{
     sync::{Arc, Mutex},
@@ -28,8 +28,8 @@ pub struct VictimHub {
 
 impl VictimHub {
     pub async fn connect(args: ConnectArgs, statusbar_handle: StatusBarHandle) -> Result<Self> {
-        let (to_victim_tx, to_victim_rx) = mpsc::channel::<ToVictim>(64);
-        let (from_victim_tx, from_victim_rx) = mpsc::channel::<ToHelper>(64);
+        let (to_victim_tx, to_victim_rx) = mpsc::channel::<ToVictim>(1024);
+        let (from_victim_tx, from_victim_rx) = mpsc::channel::<ToHelper>(1024);
 
         let link = Link::connect(args, statusbar_handle, to_victim_rx, from_victim_tx).await?;
 
@@ -48,8 +48,10 @@ impl VictimHub {
         self.from_victim_rx.lock().await.recv().await
     }
 
-    pub async fn shutdown(&self) {
-        self.link.shutdown().await
+    pub async fn close_with_bye(self, id: HelperId) {
+        let _ = self.to_victim_tx.send(ToVictim::Bye { id }).await;
+        drop(self.to_victim_tx);
+        self.link.shutdown().await;
     }
 }
 
@@ -86,7 +88,7 @@ impl Helper {
         let mut stdin_processor = StdinProcessor::new(pty_rows as i32);
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
 
-        let res: Result<()> = loop {
+        let res: Result<()> = 'main_loop: loop {
             tokio::select! {
                 // Peroidically resend term size to keep TermSizeNegotiator alive
                 _ = screen_size_resend.tick() => {
@@ -117,7 +119,7 @@ impl Helper {
                     // 1. Handle local events
                     for event in events {
                         match event {
-                            LocalEvent::Detach => return Ok(()),
+                            LocalEvent::Detach => break 'main_loop Ok(()),
                             LocalEvent::Scroll(delta) => {
                                 let offset = console.apply_scroll(delta);
                                 hub.send(ToVictim::RequestScrollTo { offset: offset as u32 }).await?;
@@ -177,8 +179,7 @@ impl Helper {
             }
         };
 
-        let _ = hub.send(ToVictim::Bye { id }).await;
-        hub.shutdown().await;
+        hub.close_with_bye(id).await;
         console.flush_and_close().await;
 
         res
@@ -188,6 +189,7 @@ impl Helper {
 struct Link {
     #[allow(unused)]
     endpoint: Endpoint,
+    writer_handle: Mutex<Option<tokio::task::JoinHandle<Result<()>>>>,
 }
 
 impl Link {
@@ -197,6 +199,13 @@ impl Link {
         mut to_victim_rx: mpsc::Receiver<ToVictim>,
         from_victim_tx: mpsc::Sender<ToHelper>,
     ) -> anyhow::Result<Self> {
+        let secret_key = args
+            .common
+            .private_key
+            .clone()
+            .unwrap_or_else(SecretKey::generate);
+        let public_key = secret_key.public();
+
         let mailbox = MailboxConnection::connect(
             app_config(&args.common),
             args.common.code.expect("code always set"),
@@ -204,81 +213,85 @@ impl Link {
         )
         .await?;
         let mut wormhole = Wormhole::connect(mailbox).await?;
-        let mut buf = [0u8; 32];
         let bytes = wormhole.receive().await?;
-        buf.copy_from_slice(&bytes);
-        let victim_public_key: PublicKey = PublicKey::from_bytes(&buf)?;
+        let payload: HandshakePayload = wincode::deserialize(&bytes)?;
 
-        let secret_key = args
-            .common
-            .private_key
-            .clone()
-            .unwrap_or_else(SecretKey::generate);
+        wormhole.send(public_key.to_vec()).await?;
 
-        let endpoint = Endpoint::builder(presets::N0)
+        let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(secret_key)
+            .relay_mode(RelayMode::Default)
             .bind()
             .await?;
+
+        let mut target_addr = EndpointAddr::new(PublicKey::from_bytes(&payload.public_key)?);
+        if let Some(relay_str) = payload.relay_url {
+            target_addr = target_addr.with_relay_url(relay_str.parse()?);
+        }
+
+        for ip in payload.direct_addresses {
+            target_addr = target_addr.with_ip_addr(ip);
+        }
 
         let connection_watcher =
             ConnectionStateWatcher::new(endpoint.clone(), statusbar_handle.clone());
         tokio::task::spawn(async move { connection_watcher.watch().await });
 
-        let connection = timeout(
-            Duration::from_secs(5),
-            endpoint.connect(victim_public_key, ALPN),
-        )
-        .await??;
+        let connection =
+            timeout(Duration::from_secs(5), endpoint.connect(target_addr, ALPN)).await??;
 
-        // Note: Helper is the initiator, so it opens the bi-directional stream using open_bi()
         let (tx, rx) = connection.open_bi().await?;
         let encoder = async_compression::tokio::write::Lz4Encoder::new(tx);
         let decoder = async_compression::tokio::bufread::Lz4Decoder::new(BufReader::new(rx));
+        let mut codec_builder = LengthDelimitedCodec::builder();
+        codec_builder.max_frame_length(8 * 1024 * 1024);
         let mut raw_writer =
-            tokio_util::codec::FramedWrite::new(encoder, LengthDelimitedCodec::new());
-        let mut raw_reader =
-            tokio_util::codec::FramedRead::new(decoder, LengthDelimitedCodec::new());
+            tokio_util::codec::FramedWrite::new(encoder, codec_builder.new_codec());
+        let mut raw_reader = tokio_util::codec::FramedRead::new(decoder, codec_builder.new_codec());
 
-        // Victim -> Helper
-        let victim_helper = tokio::spawn(async move {
-            loop {
-                let bytes = raw_reader.next().await.ok_or(anyhow!("reader is none"))??;
-                let msg = ToHelper::decode(&bytes)?;
-                from_victim_tx.send(msg).await?;
-            }
-
-            #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
-        });
-
-        // Helper -> Victim
-        let helper_victim = tokio::spawn(async move {
-            loop {
-                let msg = to_victim_rx
-                    .recv()
-                    .await
-                    .ok_or(anyhow!("channel closed"))
-                    .context("Helper to victim")?;
-
-                raw_writer.send(msg.encode()?).await?;
-            }
-
-            #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
-        });
-
-        // Spawn background task supervisor so Link::connect returns immediately
+        // 1. Reader Task (Victim -> Helper)
         tokio::spawn(async move {
-            let (res, _, _) = futures::future::select_all(vec![victim_helper, helper_victim]).await;
-            if let Err(e) = res {
-                eprintln!("Link task finished with error: {e}");
+            while let Some(res) = raw_reader.next().await {
+                match res {
+                    Ok(bytes) => {
+                        if let Ok(msg) = ToHelper::decode(&bytes) {
+                            let _ = from_victim_tx.send(msg).await;
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
         });
 
-        Ok(Self { endpoint })
+        // 2. Writer Task (Helper -> Victim)
+        let writer_handle = tokio::spawn(async move {
+            while let Some(msg) = to_victim_rx.recv().await {
+                if let Ok(encoded) = msg.encode()
+                    && raw_writer.send(encoded).await.is_err()
+                {
+                    break;
+                }
+            }
+
+            let _ = raw_writer.flush().await;
+            let _ = raw_writer.close().await;
+
+            Ok::<(), anyhow::Error>(())
+        });
+
+        Ok(Self {
+            endpoint,
+            writer_handle: Mutex::new(Some(writer_handle)),
+        })
     }
 
     pub async fn shutdown(&self) {
-        self.endpoint.close().await
+        let handle = self.writer_handle.lock().unwrap().take();
+
+        if let Some(handle) = handle {
+            let _ = tokio::time::timeout(Duration::from_millis(500), handle).await;
+        }
+
+        self.endpoint.close().await;
     }
 }

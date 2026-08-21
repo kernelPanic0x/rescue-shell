@@ -3,19 +3,19 @@ use crate::console::{
     LocalConsole, LocalEvent, Osc52Extractor, PtyResponder, Role, SCROLLBACK_LINES,
     StatusBarHandle, StdinProcessor, TerminalSizeNegotiator, window_change_signal,
 };
-use crate::protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim};
+use crate::protocol::{Encoder, HandshakePayload, TIMEOUT, TerminalSize, ToHelper, ToVictim};
 use crate::{ServeArgs, app_config};
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use crossterm::queue;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, size};
 use futures::{SinkExt, StreamExt};
-use iroh::PublicKey;
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{Connection, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
+use iroh::{PublicKey, RelayMode};
 use magic_wormhole::{Code, MailboxConnection, Wormhole};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -28,6 +28,7 @@ use tokio_util::codec::LengthDelimitedCodec;
 pub struct HelperHub {
     to_helpers: broadcast::Sender<ToHelper>,
     from_helpers_rx: tokio::sync::Mutex<mpsc::Receiver<ToVictim>>,
+    statusbar_handle: StatusBarHandle,
     #[allow(unused)]
     link: Link,
 }
@@ -38,8 +39,10 @@ impl HelperHub {
         statusbar_handle: StatusBarHandle,
         vt_parser: Arc<Mutex<vt100::Parser>>,
     ) -> Result<Self> {
-        let (to_helpers, _) = broadcast::channel(64);
-        let (from_helpers_tx, from_helpers_rx) = mpsc::channel(64);
+        let (to_helpers, _) = broadcast::channel(1024);
+        let (from_helpers_tx, from_helpers_rx) = mpsc::channel(1024);
+
+        let authenticated_peer = Arc::new(Mutex::new(None));
 
         let protocol = Protocol::new(
             &args,
@@ -47,14 +50,16 @@ impl HelperHub {
             from_helpers_tx,
             statusbar_handle.clone(),
             vt_parser,
+            authenticated_peer.clone(),
         )?;
 
-        let link = Link::new(args, protocol, statusbar_handle)
+        let link = Link::new(args, protocol, statusbar_handle.clone(), authenticated_peer)
             .await
             .context("Link creation")?;
 
         Ok(Self {
             to_helpers,
+            statusbar_handle,
             from_helpers_rx: tokio::sync::Mutex::new(from_helpers_rx),
             link,
         })
@@ -68,8 +73,20 @@ impl HelperHub {
         self.from_helpers_rx.lock().await.recv().await
     }
 
-    pub async fn shutdown(&self) {
-        self.link.shutdown().await
+    /// Clean shutdown: Sends Bye, flushes streams, and closes endpoint
+    pub async fn close_with_bye(self) {
+        self.broadcast(ToHelper::Bye);
+
+        drop(self.to_helpers);
+
+        let mut rx = self.statusbar_handle.subscribe();
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            rx.wait_for(|s| s.connected_helpers == 0),
+        )
+        .await;
+
+        self.link.shutdown().await;
     }
 }
 
@@ -207,7 +224,7 @@ impl Victim {
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
         let mut old_connected = 0;
 
-        let res: Result<()> = loop {
+        let res: Result<()> = 'main_loop: loop {
             tokio::select! {
                 // Peroidically resend term size
                 _ = screen_size_resend.tick() => {
@@ -272,7 +289,7 @@ impl Victim {
                     // 1. Handle local events
                     for event in events {
                         match event {
-                            LocalEvent::Detach => return Ok(()),
+                            LocalEvent::Detach => break 'main_loop Ok(()),
                             LocalEvent::Scroll(delta) => {
                                 let offset = console.apply_scroll(delta);
                                 hub.broadcast(ToHelper::ScrollTo { offset: offset as u32 });
@@ -351,8 +368,7 @@ impl Victim {
             }
         };
 
-        hub.broadcast(ToHelper::Bye);
-        hub.shutdown().await;
+        hub.close_with_bye().await;
         console.flush_and_close().await;
 
         res
@@ -382,6 +398,7 @@ struct Protocol {
     to_helpers: broadcast::Sender<ToHelper>,
     statusbar_handle: StatusBarHandle,
     vt_parser: Arc<Mutex<vt100::Parser>>,
+    authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
 }
 
 impl Protocol {
@@ -391,6 +408,7 @@ impl Protocol {
         from_helper: mpsc::Sender<ToVictim>,
         statusbar_handle: StatusBarHandle,
         vt_parser: Arc<Mutex<vt100::Parser>>,
+        authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
     ) -> anyhow::Result<Self> {
         let mut allowed_peers: Option<Vec<PublicKey>> = None;
 
@@ -409,6 +427,7 @@ impl Protocol {
         }
 
         Ok(Self {
+            authenticated_peer,
             allowed_peers,
             from_helper,
             to_helpers,
@@ -431,9 +450,25 @@ impl std::fmt::Debug for Protocol {
 
 impl ProtocolHandler for Protocol {
     async fn accept(&self, c: Connection) -> Result<(), AcceptError> {
-        if let Some(ref allowed) = self.allowed_peers
-            && !allowed.contains(&c.remote_id())
-        {
+        let remote_id = c.remote_id();
+
+        // 1. Check CLI whitelist
+        let is_whitelisted = self
+            .allowed_peers
+            .as_ref()
+            .map(|allowed| allowed.contains(&remote_id))
+            .unwrap_or(false);
+
+        // 2. Check Wormhole authenticated peer
+        let is_wormhole_authed = self
+            .authenticated_peer
+            .lock()
+            .unwrap()
+            .map(|expected| expected == remote_id)
+            .unwrap_or(false);
+
+        // REJECT if not explicitly authorized
+        if !is_whitelisted && !is_wormhole_authed {
             return Err(AcceptError::NotAllowed {
                 meta: n0_error::Meta::default(),
             });
@@ -447,10 +482,11 @@ impl ProtocolHandler for Protocol {
         let (tx, rx) = c.accept_bi().await?;
         let encoder = async_compression::tokio::write::Lz4Encoder::new(tx);
         let decoder = async_compression::tokio::bufread::Lz4Decoder::new(BufReader::new(rx));
+        let mut codec_builder = LengthDelimitedCodec::builder();
+        codec_builder.max_frame_length(8 * 1024 * 1024);
         let mut raw_writer =
-            tokio_util::codec::FramedWrite::new(encoder, LengthDelimitedCodec::new());
-        let mut raw_reader =
-            tokio_util::codec::FramedRead::new(decoder, LengthDelimitedCodec::new());
+            tokio_util::codec::FramedWrite::new(encoder, codec_builder.new_codec());
+        let mut raw_reader = tokio_util::codec::FramedRead::new(decoder, codec_builder.new_codec());
 
         let mut initial_state = Vec::new();
 
@@ -482,11 +518,21 @@ impl ProtocolHandler for Protocol {
 
         let victim_helper = tokio::spawn(async move {
             loop {
-                let msg = to_helpers.recv().await?;
-                raw_writer.send(msg.encode()?).await?;
+                match to_helpers.recv().await {
+                    Ok(msg) => {
+                        raw_writer.send(msg.encode()?).await?;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        return Err(anyhow!("Helper lagged behind by {n} frames"));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
 
-            #[allow(unreachable_code)]
+            // Flush & close the LZ4 encoder and QUIC stream cleanly
+            let _ = raw_writer.flush().await;
+            let _ = raw_writer.close().await;
+
             Ok::<(), anyhow::Error>(())
         });
 
@@ -515,6 +561,7 @@ impl Link {
         args: ServeArgs,
         protocol: Protocol,
         statusbar_handle: StatusBarHandle,
+        authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
     ) -> anyhow::Result<Self> {
         let secret_key = args
             .common
@@ -522,12 +569,23 @@ impl Link {
             .clone()
             .unwrap_or_else(SecretKey::generate);
 
-        let public_key = secret_key.public();
-
-        let endpoint = Endpoint::builder(presets::N0)
+        let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(secret_key.clone())
+            // 1. Enable relay & STUN (needed for hole punching & fallback)
+            .relay_mode(RelayMode::Default)
             .bind()
             .await?;
+
+        // 2. Wait until STUN and Relay discovery are complete
+        endpoint.online().await;
+
+        let my_addr = endpoint.addr();
+        let payload = HandshakePayload {
+            public_key: *my_addr.id.as_bytes(),
+            relay_url: my_addr.relay_urls().next().map(|u| u.to_string()),
+            direct_addresses: my_addr.ip_addrs().copied().collect(),
+        };
+        let encoded_handshake = wincode::serialize(&payload)?;
 
         let router = Router::builder(endpoint.clone())
             .accept(ALPN, protocol)
@@ -538,7 +596,7 @@ impl Link {
 
         tokio::task::spawn(async move {
             loop {
-                let wormhole = async {
+                let res: Result<()> = async {
                     let mailbox = match &args.common.code {
                         Some(code) => {
                             MailboxConnection::connect(
@@ -561,35 +619,50 @@ impl Link {
                     statusbar_handle.set_code(Some(code.clone()));
 
                     let mut wormhole = Wormhole::connect(mailbox).await?;
-                    wormhole.send(public_key.as_bytes().to_vec()).await?;
+                    wormhole.send(encoded_handshake.clone()).await?;
 
-                    Ok::<(), anyhow::Error>(())
-                };
+                    let bytes = wormhole.receive().await?;
+                    let helper_public_key = PublicKey::try_from(bytes.as_slice())?;
 
-                let not_alone = async {
-                    if args.multiple_helpers {
-                        // continue generating codes
-                        let _ = std::future::pending::<Result<()>>().await;
-                    } else {
-                        let _ = statusbar_handle
-                            .subscribe()
-                            .wait_for(|s| s.connected_helpers > 0)
-                            .await;
-                    }
+                    authenticated_peer
+                        .lock()
+                        .unwrap()
+                        .replace(helper_public_key);
 
-                    Ok::<(), anyhow::Error>(())
-                };
+                    if !args.multiple_helpers {
+                        // Timeout after 60s if the helper never connects via QUIC
+                        tokio::time::timeout(
+                            Duration::from_secs(10),
+                            statusbar_handle
+                                .subscribe()
+                                .wait_for(|s| s.connected_helpers > 0),
+                        )
+                        .await
+                        .map_err(|_| {
+                            anyhow!("Helper connected via wormhole but timed out dialing QUIC")
+                        })??;
 
-                tokio::select! {
-                    _ = wormhole => {}
-                    _ = not_alone => {
                         statusbar_handle.set_code(None);
 
-                        // wait until alone again
-                        let _ = statusbar_handle.subscribe().wait_for(|s| s.connected_helpers == 0).await;
+                        let _ = statusbar_handle
+                            .subscribe()
+                            .wait_for(|s| s.connected_helpers == 0)
+                            .await;
+                        *authenticated_peer.lock().unwrap() = None;
                     }
+
+                    Ok(())
+                }
+                .await;
+
+                if res.is_err() {
+                    statusbar_handle.set_code(None);
+                    *authenticated_peer.lock().unwrap() = None;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
+            #[allow(unreachable_code)]
+            Ok::<(), anyhow::Error>(())
         });
 
         Ok(Self { secret_key, router })
