@@ -1,7 +1,7 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
-    LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, SgrMouseTranslator, StatusBarHandle,
-    TerminalSizeNegotiator, is_detach_key, is_sgr_mouse, process_pty_output, scroll_delta,
+    LocalConsole, Osc52Extractor, PtyResponder, Role, SCROLLBACK_LINES, SgrMouseTranslator,
+    StatusBarHandle, TerminalSizeNegotiator, is_detach_key, is_sgr_mouse, scroll_delta,
     window_change_signal,
 };
 use crate::protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim};
@@ -195,7 +195,6 @@ impl Victim {
         let mut statusbar_rx = statusbar_handle.subscribe();
 
         let pty = PtySession::spawn(cols, pty_rows)?;
-        let mut vte_parser = vte::Parser::new();
         let mut osc52_extractor = Osc52Extractor::default();
         let hub =
             HelperHub::start(args.clone(), statusbar_handle.clone(), vt_parser.clone()).await?;
@@ -204,6 +203,7 @@ impl Victim {
         let mut screen_size_resend =
             tokio::time::interval(Duration::from_secs((TIMEOUT / 2).as_secs()));
 
+        let mut pty_responder = PtyResponder::new(vt_parser.clone());
         let mut mouse_translator = SgrMouseTranslator::default();
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
         let mut old_connected = 0;
@@ -242,7 +242,7 @@ impl Victim {
                     // On Windows, ConPTY already answers the shell's queries itself, and
                     // injecting our own ESC-prefixed replies leaks a lone ESC keystroke
                     // into PSReadLine (bound to RevertLine = clear the command line).
-                    if let Some(reply) = process_pty_output(&bytes, vt_parser.clone(), &mut vte_parser)? {
+                    if let Some(reply) = pty_responder.process(&bytes) {
                         pty.write_input(reply).await?;
                     }
 
@@ -250,9 +250,8 @@ impl Victim {
                         console.write_stdout(output).await?;
                     }
 
-                    console.render().await?;
-
                     hub.broadcast(ToHelper::Data(Bytes::from(bytes)));
+                    console.render().await?;
                 }
 
                 // Victim local typing -> Send to PTY

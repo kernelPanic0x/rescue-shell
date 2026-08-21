@@ -575,12 +575,37 @@ fn xtversion(program: &str, version: &str) -> Vec<u8> {
 ///   read by vim 9.1.1666+, tmux, Windows Terminal, upcoming nvim).
 const DA1_RESP: &[u8] = b"\x1b[?62;1;9;15;22;29;52c";
 
-struct PtyDispatcher<'a> {
-    vt100_parser: &'a Arc<Mutex<vt100::Parser>>,
-    reply: Vec<u8>,
+pub struct PtyResponder {
+    parser: vte::Parser,
+    buffer: BytesMut,
+    vt_parser: Arc<Mutex<vt100::Parser>>,
 }
 
-impl Perform for PtyDispatcher<'_> {
+impl PtyResponder {
+    pub fn new(vt_parser: Arc<Mutex<vt100::Parser>>) -> Self {
+        Self {
+            parser: vte::Parser::new(),
+            buffer: BytesMut::new(),
+            vt_parser,
+        }
+    }
+
+    pub fn process(&mut self, chunk: &[u8]) -> Option<Bytes> {
+        let mut handler = PtyResponderHandler {
+            vt_parser: &self.vt_parser,
+            buffer: &mut self.buffer,
+        };
+        self.parser.advance(&mut handler, chunk);
+        (!self.buffer.is_empty()).then_some(self.buffer.split().freeze())
+    }
+}
+
+struct PtyResponderHandler<'a> {
+    vt_parser: &'a Arc<Mutex<vt100::Parser>>,
+    buffer: &'a mut BytesMut,
+}
+
+impl Perform for PtyResponderHandler<'_> {
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         // Retrieve the first parameter if present, or default to 0
         let first_param = params
@@ -593,21 +618,21 @@ impl Perform for PtyDispatcher<'_> {
         match (action, intermediates) {
             // DA1 (CSI c / CSI 0 c): answer on ALL platforms — ConPTY sends this to us.
             ('c', []) if first_param == 0 => {
-                self.reply.extend_from_slice(DA1_RESP);
+                self.buffer.extend_from_slice(DA1_RESP);
             }
 
             ('n', []) => match first_param {
                 // CPR (DSR 6n): answer on ALL platforms — ConPTY needs the cursor position.
                 6 => {
-                    let (row, col) = self.vt100_parser.lock().unwrap().screen().cursor_position();
+                    let (row, col) = self.vt_parser.lock().unwrap().screen().cursor_position();
                     let cpr = format!("\x1b[{};{}R", row + 1, col + 1);
-                    self.reply.extend_from_slice(cpr.as_bytes());
+                    self.buffer.extend_from_slice(cpr.as_bytes());
                 }
                 // DSR 5n: Unix only. On Windows ConPTY answers this for the shell
                 // itself; emitting our own leaks an ESC keystroke.
                 #[cfg(unix)]
                 5 => {
-                    self.reply.extend_from_slice(DSR_OK_RESP);
+                    self.buffer.extend_from_slice(DSR_OK_RESP);
                 }
                 _ => {}
             },
@@ -616,11 +641,11 @@ impl Perform for PtyDispatcher<'_> {
             // us (ConPTY answers them), and answering unsolicited leaks an ESC.
             #[cfg(unix)]
             ('c', b">") if first_param == 0 => {
-                self.reply.extend_from_slice(DA2_RESP);
+                self.buffer.extend_from_slice(DA2_RESP);
             }
             #[cfg(unix)]
             ('q', b">") => {
-                self.reply.extend_from_slice(&xtversion(
+                self.buffer.extend_from_slice(&xtversion(
                     env!("CARGO_PKG_NAME"),
                     env!("CARGO_PKG_VERSION"),
                 ));
@@ -629,21 +654,6 @@ impl Perform for PtyDispatcher<'_> {
             _ => {}
         }
     }
-}
-
-pub fn process_pty_output(
-    chunk: &[u8],
-    vt100_parser: Arc<Mutex<vt100::Parser>>,
-    parser: &mut vte::Parser,
-) -> anyhow::Result<Option<Bytes>> {
-    let mut dispatcher = PtyDispatcher {
-        vt100_parser: &vt100_parser,
-        reply: Vec::new(),
-    };
-
-    parser.advance(&mut dispatcher, chunk);
-
-    Ok((!dispatcher.reply.is_empty()).then_some(Bytes::from(dispatcher.reply)))
 }
 
 #[derive(Default)]
