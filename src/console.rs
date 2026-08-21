@@ -646,38 +646,26 @@ pub fn process_pty_output(
     Ok((!dispatcher.reply.is_empty()).then_some(Bytes::from(dispatcher.reply)))
 }
 
+#[derive(Default)]
 pub struct Osc52Extractor {
     parser: vte::Parser,
     buffer: BytesMut,
-}
-
-impl Default for Osc52Extractor {
-    fn default() -> Self {
-        let parser = vte::Parser::new();
-        let buffer = BytesMut::new();
-        Self { parser, buffer }
-    }
 }
 
 impl Osc52Extractor {
     /// Strips everything EXCEPT complete OSC 52 escape sequences from the byte stream.
     pub fn extract(&mut self, chunk: &[u8]) -> Option<Bytes> {
         let mut handler = Osc52Handler {
-            chunk: &mut self.buffer,
+            buffer: &mut self.buffer,
         };
         self.parser.advance(&mut handler, chunk);
-
-        if self.buffer.is_empty() {
-            None
-        } else {
-            Some(self.buffer.split().freeze())
-        }
+        (!self.buffer.is_empty()).then_some(self.buffer.split().freeze())
     }
 }
 
 /// Private helper that collects filtered OSC 52 sequences dispatched by `vte`
 struct Osc52Handler<'a> {
-    chunk: &'a mut BytesMut,
+    buffer: &'a mut BytesMut,
 }
 
 impl Perform for Osc52Handler<'_> {
@@ -694,24 +682,24 @@ impl Perform for Osc52Handler<'_> {
                 _ => b"c",
             };
 
-            self.chunk.extend_from_slice(b"\x1b]52;");
-            self.chunk.extend_from_slice(target);
+            self.buffer.extend_from_slice(b"\x1b]52;");
+            self.buffer.extend_from_slice(target);
 
             // Re-attach payload (params[2] and beyond)
             if params.len() > 2 {
                 for p in &params[2..] {
-                    self.chunk.extend_from_slice(b";");
-                    self.chunk.extend_from_slice(p);
+                    self.buffer.extend_from_slice(b";");
+                    self.buffer.extend_from_slice(p);
                 }
             } else {
-                self.chunk.extend_from_slice(b";");
+                self.buffer.extend_from_slice(b";");
             }
 
             // Re-attach original terminator
             if bell_terminated {
-                self.chunk.extend_from_slice(&[0x07]);
+                self.buffer.extend_from_slice(&[0x07]);
             } else {
-                self.chunk.extend_from_slice(b"\x1b\\");
+                self.buffer.extend_from_slice(b"\x1b\\");
             }
         }
     }
@@ -849,43 +837,90 @@ pub fn is_sgr_mouse(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x1b[<") && matches!(bytes.last(), Some(b'M') | Some(b'm'))
 }
 
-/// Adjusts SGR mouse coordinates by subtracting `row_offset` (e.g., 1 for the status bar).
-///
-/// Returns:
-/// - `Some(adjusted_bytes)`: The modified SGR sequence to send to the PTY.
-/// - `None`: If the click landed on the status bar (should be dropped).
-pub fn translate_sgr_mouse(bytes: &[u8], row_offset: u16) -> Option<Bytes> {
-    // SGR mouse format: \x1b[<BUTTON;COL;ROW(M|m)
-    if !bytes.starts_with(b"\x1b[<") {
-        return Some(Bytes::copy_from_slice(bytes));
+#[derive(Default)]
+pub struct SgrMouseTranslator {
+    parser: vte::Parser,
+    buffer: BytesMut,
+}
+
+impl SgrMouseTranslator {
+    pub fn translate(&mut self, chunk: &[u8]) -> Option<Bytes> {
+        let mut handler = SgrMouseTranslatorHandler {
+            buffer: &mut self.buffer,
+        };
+        self.parser.advance(&mut handler, chunk);
+        (!self.buffer.is_empty()).then_some(self.buffer.split().freeze())
+    }
+}
+
+struct SgrMouseTranslatorHandler<'a> {
+    buffer: &'a mut BytesMut,
+}
+
+impl Perform for SgrMouseTranslatorHandler<'_> {
+    // 1. Regular characters / text input
+    fn print(&mut self, c: char) {
+        let mut buf = [0u8; 4];
+        self.buffer
+            .extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
     }
 
-    let s = std::str::from_utf8(bytes).ok()?;
-    let last_char = s.chars().last()?;
-    if last_char != 'M' && last_char != 'm' {
-        return Some(Bytes::copy_from_slice(bytes));
+    // 2. Control characters (e.g. \n, \r, \t, Ctrl+C)
+    fn execute(&mut self, byte: u8) {
+        self.buffer.extend_from_slice(&[byte]);
     }
 
-    let inner = &s[3..s.len() - 1]; // Strip "\x1b[<" and trailing "M"/"m"
-    let mut parts = inner.split(';');
+    // 3. CSI Sequences (where SGR mouse events live)
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // Match SGR mouse sequence: CSI < btn ; col ; row (M|m)
+        if intermediates == b"<" && (action == 'M' || action == 'm') {
+            let mut iter = params.iter();
+            if let (Some(&[btn]), Some(&[col]), Some(&[row])) =
+                (iter.next(), iter.next(), iter.next())
+                && iter.next().is_none()
+            {
+                // Filter logic: only output if row > offset
+                if row > 1 {
+                    let adjusted_row = row - 1;
+                    let seq = format!("\x1b[<{btn};{col};{adjusted_row}{action}");
+                    self.buffer.extend_from_slice(seq.as_bytes());
+                }
+                // If row <= row_offset, it is dropped silently without affecting other bytes!
+                return;
+            }
+        }
 
-    let btn = parts.next()?;
-    let col = parts.next()?;
-    let row: u16 = parts.next()?.parse().ok()?;
-
-    if parts.next().is_some() {
-        return Some(Bytes::copy_from_slice(bytes));
+        // Fallback: Reconstruct any other CSI sequence (e.g. arrow keys, cursor reports)
+        self.buffer.extend_from_slice(b"\x1b[");
+        for &byte in intermediates {
+            self.buffer.extend_from_slice(&[byte]);
+        }
+        let mut first = true;
+        for subparam in params.iter() {
+            if !first {
+                self.buffer.extend_from_slice(b";");
+            }
+            first = false;
+            let mut sub_first = true;
+            for &val in subparam {
+                if !sub_first {
+                    self.buffer.extend_from_slice(b":");
+                }
+                sub_first = false;
+                self.buffer.extend_from_slice(val.to_string().as_bytes());
+            }
+        }
+        let mut action_buf = [0u8; 4];
+        self.buffer
+            .extend_from_slice(action.encode_utf8(&mut action_buf).as_bytes());
     }
 
-    // If the click is on the status bar (Row <= row_offset), drop it
-    if row <= row_offset {
-        return None;
+    // 4. Handle other escape sequences (like Alt+key)
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        self.buffer.extend_from_slice(b"\x1b");
+        self.buffer.extend_from_slice(intermediates);
+        self.buffer.extend_from_slice(&[byte]);
     }
-
-    let adjusted_row = row - row_offset;
-    Some(Bytes::from(format!(
-        "\x1b[<{btn};{col};{adjusted_row}{last_char}"
-    )))
 }
 
 struct HelperLifetime {

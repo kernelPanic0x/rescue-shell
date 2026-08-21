@@ -2,8 +2,8 @@ use crate::{
     ConnectArgs, app_config,
     common::{ALPN, ConnectionStateWatcher},
     console::{
-        LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, is_detach_key,
-        is_sgr_mouse, scroll_delta, translate_sgr_mouse, window_change_signal,
+        LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, SgrMouseTranslator, StatusBarHandle,
+        is_detach_key, is_sgr_mouse, scroll_delta, window_change_signal,
     },
     protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim},
 };
@@ -83,6 +83,7 @@ impl Helper {
         let mut screen_size_resend =
             tokio::time::interval(Duration::from_secs((TIMEOUT / 2).as_secs()));
 
+        let mut mouse_translator = SgrMouseTranslator::default();
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
 
         let res: Result<()> = loop {
@@ -138,14 +139,9 @@ impl Helper {
                     }
 
 
-                    // Adjust mouse coordinates if this is an SGR mouse event
-                    let adjusted = if is_sgr_mouse(&bytes) {
-                        match translate_sgr_mouse(&bytes, 1) {
-                            Some(adjusted) => adjusted,
-                            None => continue, // Clicked on status bar: drop it
-                        }
-                    } else {
-                        bytes
+                    let adjusted = match mouse_translator.translate(&bytes) {
+                        Some(adj) => adj,
+                        None => continue,
                     };
 
                     hub.send(ToVictim::Data(adjusted)).await?;
