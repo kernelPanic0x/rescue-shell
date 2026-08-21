@@ -2,8 +2,8 @@ use crate::{
     ConnectArgs, app_config,
     common::{ALPN, ConnectionStateWatcher},
     console::{
-        LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, SgrMouseTranslator, StatusBarHandle,
-        is_detach_key, is_sgr_mouse, scroll_delta, window_change_signal,
+        LocalConsole, LocalEvent, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle,
+        StdinProcessor, window_change_signal,
     },
     protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim},
 };
@@ -83,7 +83,7 @@ impl Helper {
         let mut screen_size_resend =
             tokio::time::interval(Duration::from_secs((TIMEOUT / 2).as_secs()));
 
-        let mut mouse_translator = SgrMouseTranslator::default();
+        let mut stdin_processor = StdinProcessor::new(pty_rows as i32);
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
 
         let res: Result<()> = loop {
@@ -100,14 +100,6 @@ impl Helper {
 
                 // Raw stdin bytes -> filter -> send to victim
                 Some(bytes) = console.read_stdin() => {
-                    if bytes.is_empty() {
-                        continue;
-                    }
-
-                    if is_detach_key(&bytes) {
-                        break Ok(());
-                    }
-
                     let (alt, mouse_on, scrolled) = {
                         let p = vt_parser.lock().unwrap();
                         (
@@ -117,34 +109,31 @@ impl Helper {
                         )
                     };
 
-                    if !alt {
-                        if let Some(delta) = scroll_delta(&bytes, pty_rows as i32) {
-                            let offset = console.apply_scroll(delta);
-                            hub.send(ToVictim::RequestScrollTo { offset: offset as u32 }).await?;
-                            console.render().await?;
-                            continue;
-                        }
+                    stdin_processor.set_state(alt, mouse_on, pty_rows as i32);
 
-                        // Clicks/drag are now being reported too (we forced ?1000h). Only
-                        // forward them if the remote app actually enabled mouse handling.
-                        if is_sgr_mouse(&bytes) && !mouse_on {
-                            continue;
-                        }
+                    // Parse bytes safely (streaming tokenizer)
+                    let (events, pty_bytes) = stdin_processor.process(&bytes);
 
-                        if scrolled {
-                            vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
-                            hub.send(ToVictim::RequestScrollTo { offset: 0 }).await?;
-                            console.render().await?;
+                    // 1. Handle local events
+                    for event in events {
+                        match event {
+                            LocalEvent::Detach => return Ok(()),
+                            LocalEvent::Scroll(delta) => {
+                                let offset = console.apply_scroll(delta);
+                                hub.send(ToVictim::RequestScrollTo { offset: offset as u32 }).await?;
+                                console.render().await?;
+                            }
                         }
                     }
 
+                    // 2. Reset scrollback if user typed/forwarded regular keys while scrolled back
+                    if !alt && scrolled && !pty_bytes.is_empty() {
+                        vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
+                        hub.send(ToVictim::RequestScrollTo { offset: 0 }).await?;
+                        console.render().await?;
+                    }
 
-                    let adjusted = match mouse_translator.translate(&bytes) {
-                        Some(adj) => adj,
-                        None => continue,
-                    };
-
-                    hub.send(ToVictim::Data(adjusted)).await?;
+                    hub.send(ToVictim::Data(pty_bytes)).await?;
                 }
 
                 // Window resize signal (SIGWINCH)

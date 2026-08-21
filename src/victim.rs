@@ -1,8 +1,7 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
-    LocalConsole, Osc52Extractor, PtyResponder, Role, SCROLLBACK_LINES, SgrMouseTranslator,
-    StatusBarHandle, TerminalSizeNegotiator, is_detach_key, is_sgr_mouse, scroll_delta,
-    window_change_signal,
+    LocalConsole, LocalEvent, Osc52Extractor, PtyResponder, Role, SCROLLBACK_LINES,
+    StatusBarHandle, StdinProcessor, TerminalSizeNegotiator, window_change_signal,
 };
 use crate::protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim};
 use crate::{ServeArgs, app_config};
@@ -203,8 +202,8 @@ impl Victim {
         let mut screen_size_resend =
             tokio::time::interval(Duration::from_secs((TIMEOUT / 2).as_secs()));
 
+        let mut stdin_processor = StdinProcessor::new(pty_rows as i32);
         let mut pty_responder = PtyResponder::new(vt_parser.clone());
-        let mut mouse_translator = SgrMouseTranslator::default();
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
         let mut old_connected = 0;
 
@@ -256,10 +255,6 @@ impl Victim {
 
                 // Victim local typing -> Send to PTY
                 Some(bytes) = console.read_stdin() => {
-                    if is_detach_key(&bytes) {
-                        break Ok(());
-                    }
-
                     let (alt, mouse_on, scrolled) = {
                         let p = vt_parser.lock().unwrap();
                         (
@@ -269,32 +264,31 @@ impl Victim {
                         )
                     };
 
+                    stdin_processor.set_state(alt, mouse_on, pty_rows as i32);
 
-                    if !alt {
-                        if let Some(delta) = scroll_delta(&bytes, pty_rows as i32) {
-                            let offset = console.apply_scroll(delta);
-                            hub.broadcast(ToHelper::ScrollTo { offset: offset as u32 });
-                            console.render().await?;
-                            continue;
-                        }
+                    // Parse bytes safely (streaming tokenizer)
+                    let (events, pty_bytes) = stdin_processor.process(&bytes);
 
-                        if is_sgr_mouse(&bytes) && !mouse_on {
-                            continue;
-                        }
-
-                        if scrolled {
-                            vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
-                            hub.broadcast(ToHelper::ScrollTo { offset: 0 });
-                            console.render().await?;
+                    // 1. Handle local events
+                    for event in events {
+                        match event {
+                            LocalEvent::Detach => return Ok(()),
+                            LocalEvent::Scroll(delta) => {
+                                let offset = console.apply_scroll(delta);
+                                hub.broadcast(ToHelper::ScrollTo { offset: offset as u32 });
+                                console.render().await?;
+                            }
                         }
                     }
 
-                    let adjusted = match mouse_translator.translate(&bytes) {
-                        Some(adj) => adj,
-                        None => continue,
-                    };
+                    // 2. Reset scrollback if user typed/forwarded regular keys while scrolled back
+                    if !alt && scrolled && !pty_bytes.is_empty() {
+                        vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
+                        hub.broadcast(ToHelper::ScrollTo { offset: 0 });
+                        console.render().await?;
+                    }
 
-                    pty.write_input(adjusted).await?;
+                    pty.write_input(pty_bytes).await?;
                 }
 
                 // Remote messages from Helper -> Send to PTY / Resize

@@ -256,11 +256,6 @@ impl StatusBarHandle {
     }
 }
 
-pub fn is_detach_key(bytes: &[u8]) -> bool {
-    // Ctrl+] (0x1D) detaches locally
-    bytes.contains(&0x1d)
-}
-
 pub struct LocalConsole {
     stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
     stdout_tx: Option<mpsc::Sender<Bytes>>,
@@ -808,128 +803,180 @@ pub fn window_change_signal() -> mpsc::Receiver<()> {
     rx
 }
 
-/// Returns Some(delta) when `bytes` is a local scroll gesture and must NOT be
-/// forwarded to the remote shell. Positive = scroll back (older).
-pub fn scroll_delta(bytes: &[u8], page_size: i32) -> Option<i32> {
-    match bytes {
-        b"\x1b[5~" => Some(page_size),    // PageUp
-        b"\x1b[6~" => Some(-page_size),   // PageDown
-        b"\x1b[5;2~" => Some(page_size),  // Shift+PageUp
-        b"\x1b[6;2~" => Some(-page_size), // Shift+PageDown
-        b"\x1b[1;5A" => Some(1),          // Ctrl+Up
-        b"\x1b[1;5B" => Some(-1),         // Ctrl+Down
-        _ => sgr_wheel_delta(bytes, 3),   // mouse wheel, if enabled (see below)
-    }
+#[derive(Debug, PartialEq, Eq)]
+pub enum LocalEvent {
+    Detach,
+    Scroll(i32),
 }
 
-/// SGR mouse wheel: ESC [ < 64/65 ; row ; col M/m
-fn sgr_wheel_delta(bytes: &[u8], lines: i32) -> Option<i32> {
-    let body = bytes.strip_prefix(b"\x1b[<")?;
-
-    // Find the index of the first semicolon to replace `split_once`
-    let idx = body.iter().position(|&b| b == b';')?;
-    let button = &body[..idx];
-    let rest = &body[idx + 1..];
-
-    if !rest.contains(&b';') || *rest.last()? != b'M' {
-        return None; // press only; ignore the matching release `m`
-    }
-
-    let button: i32 = std::str::from_utf8(button).ok()?.parse().ok()?;
-    match button {
-        64 => Some(lines),  // wheel up
-        65 => Some(-lines), // wheel down
-        _ => None,
-    }
-}
-
-pub fn is_sgr_mouse(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"\x1b[<") && matches!(bytes.last(), Some(b'M') | Some(b'm'))
-}
-
-#[derive(Default)]
-pub struct SgrMouseTranslator {
+pub struct StdinProcessor {
     parser: vte::Parser,
-    buffer: BytesMut,
+    handler: StdinHandler,
 }
 
-impl SgrMouseTranslator {
-    pub fn translate(&mut self, chunk: &[u8]) -> Option<Bytes> {
-        let mut handler = SgrMouseTranslatorHandler {
-            buffer: &mut self.buffer,
-        };
-        self.parser.advance(&mut handler, chunk);
-        (!self.buffer.is_empty()).then_some(self.buffer.split().freeze())
+impl StdinProcessor {
+    pub fn new(page_size: i32) -> Self {
+        Self {
+            parser: vte::Parser::new(),
+            handler: StdinHandler::new(1, page_size),
+        }
+    }
+
+    pub fn set_state(&mut self, alt_screen: bool, mouse_on: bool, page_size: i32) {
+        self.handler.alt_screen = alt_screen;
+        self.handler.mouse_on = mouse_on;
+        self.handler.page_size = page_size;
+    }
+
+    /// Process a stream chunk and return (local_events, bytes_to_forward_to_pty)
+    pub fn process(&mut self, input: &[u8]) -> (Vec<LocalEvent>, Bytes) {
+        self.parser.advance(&mut self.handler, input);
+        let events = std::mem::take(&mut self.handler.events);
+        let pty_bytes = self.handler.pty_output.split().freeze();
+
+        (events, pty_bytes)
     }
 }
 
-struct SgrMouseTranslatorHandler<'a> {
-    buffer: &'a mut BytesMut,
+struct StdinHandler {
+    row_offset: u16,
+    page_size: i32,
+    mouse_on: bool,
+    alt_screen: bool,
+
+    // Outputs collected per batch
+    events: Vec<LocalEvent>,
+    pty_output: BytesMut,
 }
 
-impl Perform for SgrMouseTranslatorHandler<'_> {
-    // 1. Regular characters / text input
+impl StdinHandler {
+    fn new(row_offset: u16, page_size: i32) -> Self {
+        Self {
+            row_offset,
+            page_size,
+            mouse_on: false,
+            alt_screen: false,
+            events: Vec::new(),
+            pty_output: BytesMut::new(),
+        }
+    }
+}
+
+impl Perform for StdinHandler {
+    // 1. Regular character typing
     fn print(&mut self, c: char) {
         let mut buf = [0u8; 4];
-        self.buffer
+        self.pty_output
             .extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
     }
 
-    // 2. Control characters (e.g. \n, \r, \t, Ctrl+C)
+    // 2. Control characters (Ctrl+C, \r, \n, \t, etc.)
     fn execute(&mut self, byte: u8) {
-        self.buffer.extend_from_slice(&[byte]);
+        // Detach sequence: Ctrl+] (0x1D) or Ctrl+Q (0x11), adapt to your `is_detach_key`
+        if byte == 0x1d {
+            self.events.push(LocalEvent::Detach);
+            return;
+        }
+        self.pty_output.extend_from_slice(&[byte]);
     }
 
-    // 3. CSI Sequences (where SGR mouse events live)
+    // 3. CSI Sequences (Mouse, Arrow keys, PageUp/Down, etc.)
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
-        // Match SGR mouse sequence: CSI < btn ; col ; row (M|m)
-        if intermediates == b"<" && (action == 'M' || action == 'm') {
-            let mut iter = params.iter();
-            if let (Some(&[btn]), Some(&[col]), Some(&[row])) =
-                (iter.next(), iter.next(), iter.next())
-                && iter.next().is_none()
-            {
-                // Filter logic: only output if row > offset
-                if row > 1 {
-                    let adjusted_row = row - 1;
-                    let seq = format!("\x1b[<{btn};{col};{adjusted_row}{action}");
-                    self.buffer.extend_from_slice(seq.as_bytes());
+        let p_list: Vec<&[u16]> = params.iter().collect();
+
+        // --- LOCAL SCROLL CHECK (when NOT in alternate screen) ---
+        if !self.alt_screen {
+            // PageUp: CSI 5 ~  |  Shift+PageUp: CSI 5 ; 2 ~
+            if intermediates.is_empty() && action == '~' {
+                match p_list.as_slice() {
+                    [[5]] | [[5], [2]] => {
+                        self.events.push(LocalEvent::Scroll(self.page_size));
+                        return;
+                    }
+                    [[6]] | [[6], [2]] => {
+                        self.events.push(LocalEvent::Scroll(-self.page_size));
+                        return;
+                    }
+                    _ => {}
                 }
-                // If row <= row_offset, it is dropped silently without affecting other bytes!
-                return;
+            }
+
+            // Ctrl+Up: CSI 1 ; 5 A  |  Ctrl+Down: CSI 1 ; 5 B
+            if intermediates.is_empty()
+                && let [[1], [5]] = p_list.as_slice()
+            {
+                if action == 'A' {
+                    self.events.push(LocalEvent::Scroll(1));
+                    return;
+                } else if action == 'B' {
+                    self.events.push(LocalEvent::Scroll(-1));
+                    return;
+                }
             }
         }
 
-        // Fallback: Reconstruct any other CSI sequence (e.g. arrow keys, cursor reports)
-        self.buffer.extend_from_slice(b"\x1b[");
-        for &byte in intermediates {
-            self.buffer.extend_from_slice(&[byte]);
+        // --- SGR MOUSE EVENTS: CSI < btn ; col ; row (M|m) ---
+        if intermediates == b"<"
+            && (action == 'M' || action == 'm')
+            && let [Some(&[btn]), Some(&[col]), Some(&[row])] = [
+                params.iter().next(),
+                params.iter().nth(1),
+                params.iter().nth(2),
+            ]
+        {
+            // SGR Wheel Scroll (64: wheel up, 65: wheel down) on press ('M')
+            if !self.alt_screen && action == 'M' && (btn == 64 || btn == 65) {
+                let delta = if btn == 64 { 3 } else { -3 };
+                self.events.push(LocalEvent::Scroll(delta));
+                return;
+            }
+
+            // If remote application didn't enable mouse, discard mouse sequences in main screen
+            if !self.alt_screen && !self.mouse_on {
+                return;
+            }
+
+            // Discard click if it hits the status bar
+            if row <= self.row_offset {
+                return;
+            }
+
+            // Adjust row offset and forward to PTY
+            let adjusted_row = row - self.row_offset;
+            let seq = format!("\x1b[<{btn};{col};{adjusted_row}{action}");
+            self.pty_output.extend_from_slice(seq.as_bytes());
+            return;
         }
+
+        // --- FALLBACK: Forward any unhandled CSI sequence to PTY ---
+        self.pty_output.extend_from_slice(b"\x1b[");
+        self.pty_output.extend_from_slice(intermediates);
         let mut first = true;
         for subparam in params.iter() {
             if !first {
-                self.buffer.extend_from_slice(b";");
+                self.pty_output.extend_from_slice(b";");
             }
             first = false;
             let mut sub_first = true;
             for &val in subparam {
                 if !sub_first {
-                    self.buffer.extend_from_slice(b":");
+                    self.pty_output.extend_from_slice(b":");
                 }
                 sub_first = false;
-                self.buffer.extend_from_slice(val.to_string().as_bytes());
+                self.pty_output
+                    .extend_from_slice(val.to_string().as_bytes());
             }
         }
         let mut action_buf = [0u8; 4];
-        self.buffer
+        self.pty_output
             .extend_from_slice(action.encode_utf8(&mut action_buf).as_bytes());
     }
 
-    // 4. Handle other escape sequences (like Alt+key)
+    // 4. Escape sequences (e.g. Alt+keys)
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
-        self.buffer.extend_from_slice(b"\x1b");
-        self.buffer.extend_from_slice(intermediates);
-        self.buffer.extend_from_slice(&[byte]);
+        self.pty_output.extend_from_slice(b"\x1b");
+        self.pty_output.extend_from_slice(intermediates);
+        self.pty_output.extend_from_slice(&[byte]);
     }
 }
 
