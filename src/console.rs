@@ -518,6 +518,18 @@ impl LocalConsole {
             let _ = h.await; // drain remaining frames to the local terminal
         }
     }
+
+    /// Adjust the vt100 viewport and return the new scrollback offset.
+    /// Positive delta scrolls back (older), negative scrolls forward (toward live).
+    pub fn apply_scroll(&self, delta: i32) -> usize {
+        let mut parser = self.parser.lock().unwrap();
+        let current = parser.screen().scrollback() as i64;
+        let next = (current + delta as i64).clamp(0, i64::MAX) as usize;
+        // set_scrollback clamps the upper bound to the actual history length,
+        // so we never need to know the max ourselves.
+        parser.screen_mut().set_scrollback(next);
+        parser.screen().scrollback()
+    }
 }
 
 impl Drop for LocalConsole {
@@ -796,18 +808,6 @@ pub fn window_change_signal() -> mpsc::Receiver<()> {
     });
 
     rx
-}
-
-/// Adjust the vt100 viewport and return the new scrollback offset.
-/// Positive delta scrolls back (older), negative scrolls forward (toward live).
-pub fn apply_scroll(parser: &Arc<Mutex<vt100::Parser>>, delta: i32) -> usize {
-    let mut parser = parser.lock().unwrap();
-    let current = parser.screen().scrollback() as i64;
-    let next = (current + delta as i64).clamp(0, i64::MAX) as usize;
-    // set_scrollback clamps the upper bound to the actual history length,
-    // so we never need to know the max ourselves.
-    parser.screen_mut().set_scrollback(next);
-    parser.screen().scrollback()
 }
 
 /// Returns Some(delta) when `bytes` is a local scroll gesture and must NOT be

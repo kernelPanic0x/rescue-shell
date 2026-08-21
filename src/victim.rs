@@ -1,8 +1,8 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
     LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, TerminalSizeNegotiator,
-    apply_scroll, is_detach_key, is_sgr_mouse, process_pty_output, scroll_delta,
-    translate_sgr_mouse, window_change_signal,
+    is_detach_key, is_sgr_mouse, process_pty_output, scroll_delta, translate_sgr_mouse,
+    window_change_signal,
 };
 use crate::protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim};
 use crate::{ServeArgs, app_config};
@@ -272,7 +272,7 @@ impl Victim {
 
                     if !alt {
                         if let Some(delta) = scroll_delta(&bytes, pty_rows as i32) {
-                            let offset = apply_scroll(&vt_parser, delta);
+                            let offset = console.apply_scroll(delta);
                             hub.broadcast(ToHelper::ScrollTo { offset: offset as u32 });
                             console.render().await?;
                             continue;

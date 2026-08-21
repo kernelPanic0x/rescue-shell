@@ -2,8 +2,8 @@ use crate::{
     ConnectArgs, app_config,
     common::{ALPN, ConnectionStateWatcher},
     console::{
-        LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, apply_scroll,
-        is_detach_key, is_sgr_mouse, scroll_delta, translate_sgr_mouse, window_change_signal,
+        LocalConsole, Osc52Extractor, Role, SCROLLBACK_LINES, StatusBarHandle, is_detach_key,
+        is_sgr_mouse, scroll_delta, translate_sgr_mouse, window_change_signal,
     },
     protocol::{Encoder, TIMEOUT, TerminalSize, ToHelper, ToVictim},
 };
@@ -118,7 +118,7 @@ impl Helper {
 
                     if !alt {
                         if let Some(delta) = scroll_delta(&bytes, pty_rows as i32) {
-                            let offset = apply_scroll(&vt_parser, delta);
+                            let offset = console.apply_scroll(delta);
                             hub.send(ToVictim::RequestScrollTo { offset: offset as u32 }).await?;
                             console.render().await?;
                             continue;
