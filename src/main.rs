@@ -3,17 +3,22 @@ mod common;
 mod completer;
 mod console;
 mod helper;
-mod osc52;
+mod io;
 mod protocol;
 mod victim;
 
 use std::{borrow::Cow, path::PathBuf};
 
+use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use iroh::{PublicKey, SecretKey};
 use magic_wormhole::{AppID, Code, transfer::APP_CONFIG};
 
-use crate::{helper::Helper, osc52::copy_to_osc52, victim::Victim};
+use crate::{
+    helper::Helper,
+    io::{copy_to_osc52, gen_public_key, gen_secret_key, read_public_keys_file},
+    victim::Victim,
+};
 
 #[derive(Parser)]
 #[command(
@@ -51,6 +56,10 @@ enum Cmd {
         )]
         args: Vec<std::ffi::OsString>,
     },
+    /// Generate an iroh secret key and print it to stdout.
+    GenKey,
+    /// Generate an iroh public key based a secret key read from stdin.
+    GenPub,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -110,23 +119,35 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.cmd {
-        Cmd::Serve(args) => Victim::run(args).await,
+        Cmd::Serve(mut args) => {
+            if let Some(path) = &args.allowed_public_keys_file {
+                let list = read_public_keys_file(path).context("Read public keys from file")?;
+                args.allowed_public_keys
+                    .get_or_insert_default()
+                    .extend(list);
+            }
+
+            Victim::run(args).await?
+        }
         Cmd::Connect(mut args) => {
             if args.common.code.is_none() {
                 args.common.code = Some(completer::enter_code()?.parse()?);
             }
 
-            Helper::run(args).await
+            Helper::run(args).await?
         }
-        Cmd::Copy => copy_to_osc52(),
+        Cmd::Copy => copy_to_osc52()?,
         Cmd::Wormhole { args } => {
             let code = wormhole_cli::run_from(args).await;
             if code != 0 {
                 std::process::exit(code);
             }
-            Ok(())
         }
+        Cmd::GenKey => gen_secret_key(),
+        Cmd::GenPub => gen_public_key()?,
     }
+
+    Ok(())
 }
 
 fn app_config(

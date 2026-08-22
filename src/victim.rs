@@ -45,7 +45,7 @@ impl HelperHub {
         let authenticated_peer = Arc::new(Mutex::new(None));
 
         let protocol = Protocol::new(
-            &args,
+            args.allowed_public_keys.clone(),
             to_helpers.clone(),
             from_helpers_tx,
             statusbar_handle.clone(),
@@ -403,29 +403,13 @@ struct Protocol {
 
 impl Protocol {
     fn new(
-        args: &ServeArgs,
+        allowed_peers: Option<Vec<PublicKey>>,
         to_helpers: broadcast::Sender<ToHelper>,
         from_helper: mpsc::Sender<ToVictim>,
         statusbar_handle: StatusBarHandle,
         vt_parser: Arc<Mutex<vt100::Parser>>,
         authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
     ) -> anyhow::Result<Self> {
-        let mut allowed_peers: Option<Vec<PublicKey>> = None;
-
-        if let Some(ref path) = args.allowed_public_keys_file {
-            let contents = std::fs::read_to_string(path)?;
-            let peers: Vec<PublicKey> = contents
-                .split_whitespace()
-                .map(|s| s.parse::<PublicKey>())
-                .collect::<Result<_, _>>()?;
-
-            allowed_peers.get_or_insert_default().extend(peers);
-        }
-
-        if let Some(ref peers) = args.allowed_public_keys {
-            allowed_peers.get_or_insert_default().extend(peers);
-        }
-
         Ok(Self {
             authenticated_peer,
             allowed_peers,
@@ -452,23 +436,17 @@ impl ProtocolHandler for Protocol {
     async fn accept(&self, c: Connection) -> Result<(), AcceptError> {
         let remote_id = c.remote_id();
 
-        // 1. Check CLI whitelist
-        let is_whitelisted = self
-            .allowed_peers
-            .as_ref()
-            .map(|allowed| allowed.contains(&remote_id))
-            .unwrap_or(false);
+        let is_authorized = match &self.allowed_peers {
+            Some(whitelist) => whitelist.contains(&remote_id),
+            None => self
+                .authenticated_peer
+                .lock()
+                .unwrap()
+                .map(|expected| expected == remote_id)
+                .unwrap_or(false),
+        };
 
-        // 2. Check Wormhole authenticated peer
-        let is_wormhole_authed = self
-            .authenticated_peer
-            .lock()
-            .unwrap()
-            .map(|expected| expected == remote_id)
-            .unwrap_or(false);
-
-        // REJECT if not explicitly authorized
-        if !is_whitelisted && !is_wormhole_authed {
+        if !is_authorized {
             return Err(AcceptError::NotAllowed {
                 meta: n0_error::Meta::default(),
             });
