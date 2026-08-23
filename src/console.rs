@@ -67,6 +67,34 @@ fn supports_unicode() -> bool {
     std::env::var("TERM_PROGRAM").is_ok() || std::env::var("WT_SESSION").is_ok()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorSupport {
+    TrueColor, // 24-bit (16 million colors)
+    Ansi256,   // 8-bit (256 colors)
+    Basic,     // 8/16 standard ANSI colors (Linux console, basic TTYs)
+}
+
+pub fn detect_color_support() -> ColorSupport {
+    if let Ok(ct) = std::env::var("COLORTERM")
+        && (ct == "truecolor" || ct == "24bit")
+    {
+        return ColorSupport::TrueColor;
+    }
+
+    if let Ok(term) = std::env::var("TERM") {
+        let term_lower = term.to_lowercase();
+        if term_lower.contains("256color") || term_lower.contains("256") {
+            return ColorSupport::Ansi256;
+        }
+        if term_lower == "linux" || term_lower == "dumb" || term_lower.starts_with("vt") {
+            return ColorSupport::Basic;
+        }
+    }
+
+    // Default fallback: most modern terminal emulators support at least 256 colors
+    ColorSupport::Ansi256
+}
+
 #[derive(Clone, Debug)]
 pub struct StatusBarState {
     pub code: Option<Code>,
@@ -74,6 +102,8 @@ pub struct StatusBarState {
     pub connected_helpers: u8,
     pub internet_state: InternetState,
     pub tick: usize,
+    is_utf8: bool,
+    color_mode: ColorSupport,
 }
 
 impl StatusBarState {
@@ -84,28 +114,42 @@ impl StatusBarState {
             connected_helpers: 0,
             internet_state: InternetState::Offline,
             tick: 0,
+            is_utf8: supports_unicode(),
+            color_mode: detect_color_support(),
         }
     }
 
     pub fn render_to(&self, buf: &mut Vec<u8>, cols: u16) {
-        let is_utf8 = supports_unicode();
         let width = cols as usize;
 
-        let bar_bg = Color::AnsiValue(17);
-        let default_fg = Color::White;
-        let separator_fg = Color::White;
-        let code_fg = Color::White;
+        // --- PALETTE FALLBACKS ---
+        let (bar_bg, default_fg, separator_fg, code_fg, connection_fg) = match self.color_mode {
+            ColorSupport::TrueColor | ColorSupport::Ansi256 => (
+                Color::AnsiValue(17), // Deep Navy Blue
+                Color::White,
+                Color::White,
+                Color::White,
+                Color::DarkGrey, // Readable on navy blue in 256-color
+            ),
+            ColorSupport::Basic => (
+                Color::DarkBlue, // Standard ANSI Blue (\x1b[44m) - supported by Linux console!
+                Color::White,
+                Color::White,
+                Color::White,
+                Color::Grey, // Standard ANSI Light Gray (\x1b[37m) - visible on blue/black
+            ),
+        };
 
         let (net_str, net_fg) = match self.internet_state {
             InternetState::Online(ping) => {
-                let symbol = if is_utf8 { "●" } else { "[*]" };
+                let symbol = if self.is_utf8 { "●" } else { "[*]" };
                 (
                     format!("{symbol} Online ({} ms)", ping.as_millis()),
                     Color::Green,
                 )
             }
             InternetState::Offline => {
-                let symbol = if is_utf8 { "×" } else { "[!]" };
+                let symbol = if self.is_utf8 { "×" } else { "[!]" };
                 (format!("{symbol} Offline"), Color::Red)
             }
         };
@@ -116,13 +160,12 @@ impl StatusBarState {
                 Color::Green,
             )
         } else {
-            (Cow::Borrowed("0 Connected"), Color::DarkGrey)
+            (Cow::Borrowed("0 Connected"), connection_fg)
         };
 
         let title = format!("rescue-shell {}", env!("CARGO_PKG_VERSION"));
         let role = self.role.to_string();
 
-        // Segments: (text, fg_color, is_bold)
         let mut segments: Vec<(Cow<'_, str>, Color, Attribute)> = vec![
             match &self.code {
                 Some(code) => (code.to_string().into(), code_fg, Attribute::Bold),
@@ -144,7 +187,6 @@ impl StatusBarState {
         ];
 
         let content_len: usize = segments.iter().map(|(s, _, _)| s.chars().count()).sum();
-
         let mut styled_chars: Vec<(char, Color, Attribute)> = Vec::new();
 
         if content_len <= width {
@@ -185,7 +227,7 @@ impl StatusBarState {
             let _ = queue!(buf, SetForegroundColor(fg), SetAttribute(attr), Print(text));
         }
 
-        let _ = queue!(buf, ResetColor, SetAttribute(Attribute::NormalIntensity));
+        let _ = queue!(buf, ResetColor, SetAttribute(Attribute::Reset));
     }
 }
 
