@@ -110,9 +110,9 @@ impl PtySession {
         })?;
 
         let shell = find_shell();
-        let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
         let mut cmd = CommandBuilder::new(&shell);
-        cmd.env("TERM", term);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         cmd.env("RESCUE_SHELL", std::env::current_exe()?);
         let mut child = pair
             .slave
