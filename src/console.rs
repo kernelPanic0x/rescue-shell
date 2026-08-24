@@ -481,31 +481,42 @@ impl LocalConsole {
                     buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
                 }
 
-                for (r, diff_bytes) in screen.rows_diff(s, 0, screen_cols).enumerate() {
-                    if !diff_bytes.is_empty() {
-                        let physical_row = (r as u16) + 1;
-                        if physical_row >= phys_rows {
-                            break;
-                        }
+                // O(N) linear pass: pair current rows with previous rows directly
+                let curr_rows = screen.rows_formatted(0, screen_cols);
+                let prev_rows = s.rows_formatted(0, screen_cols);
 
-                        let _ = queue!(buf, MoveTo(0, physical_row));
-                        buf.extend_from_slice(&diff_bytes);
+                for (r, (row_bytes, prev_row_bytes)) in curr_rows.zip(prev_rows).enumerate() {
+                    let physical_row = (r as u16) + 1;
+                    if physical_row >= phys_rows {
+                        break;
+                    }
 
-                        // Reset active colors, repaint the right border, and clear the margin
-                        if has_right_border {
-                            let _ = queue!(
-                                buf,
-                                MoveTo(screen_cols, physical_row),
-                                ResetColor,
-                                SetForegroundColor(border_fg),
-                                SetAttribute(Attribute::NormalIntensity),
-                                Print(v_border),
-                                ResetColor,
-                                Clear(ClearType::UntilNewLine)
-                            );
-                        } else {
-                            let _ = queue!(buf, ResetColor, SetAttribute(Attribute::Reset));
-                        }
+                    // Only repaint rows whose contents actually changed
+                    if row_bytes == prev_row_bytes {
+                        continue;
+                    }
+
+                    let _ = queue!(
+                        buf,
+                        MoveTo(0, physical_row),
+                        ResetColor,
+                        SetAttribute(Attribute::Reset),
+                        Clear(ClearType::UntilNewLine)
+                    );
+
+                    buf.extend_from_slice(&row_bytes);
+
+                    if has_right_border {
+                        let _ = queue!(
+                            buf,
+                            MoveTo(screen_cols, physical_row),
+                            ResetColor,
+                            SetForegroundColor(border_fg),
+                            SetAttribute(Attribute::NormalIntensity),
+                            Print(v_border),
+                            ResetColor,
+                            Clear(ClearType::UntilNewLine)
+                        );
                     }
                 }
             }
@@ -597,11 +608,6 @@ impl Drop for LocalConsole {
 #[cfg(unix)]
 const DA2_RESP: &[u8] = b"\x1b[>1;277;0c";
 
-/// Device Status Report reply. termwiz only knows the query `5n`; the answer
-/// "ready, no malfunction" must be emitted directly.
-#[cfg(unix)]
-const DSR_OK_RESP: &[u8] = b"\x1b[0n";
-
 /// XTVERSION reply, a DCS sequence `ESC P >| <prog> <version> ESC \`.
 /// termwiz models `>q` as the request only; the response is the DCS body.
 #[cfg(unix)]
@@ -661,21 +667,11 @@ impl Perform for PtyResponderHandler<'_> {
                 self.buffer.extend_from_slice(DA1_RESP);
             }
 
-            ('n', []) => match first_param {
-                // CPR (DSR 6n): answer on ALL platforms — ConPTY needs the cursor position.
-                6 => {
-                    let (row, col) = self.vt_parser.lock().unwrap().screen().cursor_position();
-                    let cpr = format!("\x1b[{};{}R", row + 1, col + 1);
-                    self.buffer.extend_from_slice(cpr.as_bytes());
-                }
-                // DSR 5n: Unix only. On Windows ConPTY answers this for the shell
-                // itself; emitting our own leaks an ESC keystroke.
-                #[cfg(unix)]
-                5 => {
-                    self.buffer.extend_from_slice(DSR_OK_RESP);
-                }
-                _ => {}
-            },
+            ('n', []) if first_param == 6 => {
+                let (row, col) = self.vt_parser.lock().unwrap().screen().cursor_position();
+                let cpr = format!("\x1b[{};{}R", row + 1, col + 1);
+                self.buffer.extend_from_slice(cpr.as_bytes());
+            }
 
             // Unix only: the shell queries us directly. On Windows these never reach
             // us (ConPTY answers them), and answering unsolicited leaks an ESC.
@@ -962,6 +958,20 @@ impl Perform for StdinPerformer {
     // 3. CSI Sequences (Mouse, Arrow keys, PageUp/Down, etc.)
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let p_list: Vec<&[u16]> = params.iter().collect();
+
+        // -------------------------------------------------------------
+        // FILTER 1: Drop unsolicited terminal auto-responses from stdin
+        // (CPR: \x1b[..R, DSR: \x1b[0n, DA1: \x1b[?...c)
+        // -------------------------------------------------------------
+        match (action, intermediates) {
+            // CPR Cursor Position Report response (e.g. \x1b[24;80R)
+            ('R', []) => return,
+            // DSR Device Status Report response (\x1b[0n)
+            ('n', []) if p_list.as_slice() == [[0]] => return,
+            // Primary Device Attributes response (\x1b[?62;...c)
+            ('c', b"?") => return,
+            _ => {}
+        }
 
         // --- LOCAL SCROLL CHECK (when NOT in alternate screen) ---
         if !self.alt_screen {
