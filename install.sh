@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
-set -o pipefail 2>/dev/null || true
+
+# Probe 'pipefail' in a subshell first; 'set' is a special built-in and will fatal-exit
+# older POSIX shells (bypassing '|| true') if an unsupported option is passed directly.
+(set -o pipefail 2>/dev/null) && set -o pipefail 2>/dev/null || true
 
 # --- Helpers (defined first) ---
 log() { printf '[*] %s\n' "$*" >&2; }
