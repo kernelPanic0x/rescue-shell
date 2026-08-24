@@ -37,7 +37,7 @@ Linux, FreeBSD, MacOS:
 curl -sL https://run.any64.de | sh
 ```
 
-Windows:
+Windows (PowerShell):
 ```powershell
 irm https://run.any64.de | iex
 ```
@@ -50,7 +50,7 @@ Linux, FreeBSD, MacOS:
 curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | sh
 ```
 
-Windows:
+Windows (PowerShell):
 ```powershell
 irm https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.ps1 | iex
 ```
@@ -66,9 +66,9 @@ Linux, FreeBSD, MacOS:
 curl -sL https://run.any64.de | sh -s -- connect
 ```
 
-Windows:
+Windows (PowerShell):
 ```powershell
-& { $(irm https://run.any64.de) } connect
+& ([scriptblock]::Create((irm https://run.any64.de))) connect
 ```
 
 <details>
@@ -79,9 +79,9 @@ Linux, FreeBSD, MacOS:
 curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | sh -s -- connect
 ```
 
-Windows:
+Windows (PowerShell):
 ```powershell
-& { $(irm https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.ps1) } connect
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.ps1))) connect
 ```
 
 </details>
