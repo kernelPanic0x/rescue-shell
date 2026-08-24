@@ -49,7 +49,7 @@ impl fmt::Display for InternetState {
     }
 }
 
-#[derive(Clone, Debug, strum::Display)]
+#[derive(Clone, Debug, strum::IntoStaticStr)]
 pub enum Role {
     Victim,
     Helper,
@@ -104,6 +104,7 @@ pub struct StatusBarState {
     pub tick: usize,
     is_utf8: bool,
     color_mode: ColorSupport,
+    title: String,
 }
 
 impl StatusBarState {
@@ -116,6 +117,7 @@ impl StatusBarState {
             tick: 0,
             is_utf8: supports_unicode(),
             color_mode: detect_color_support(),
+            title: format!("{} {}", env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION")),
         }
     }
 
@@ -163,8 +165,8 @@ impl StatusBarState {
             (Cow::Borrowed("0 Connected"), connection_fg)
         };
 
-        let title = format!("rescue-shell {}", env!("CARGO_PKG_VERSION"));
-        let role = self.role.to_string();
+        let role = Cow::from(<&'static str>::from(&self.role));
+        let title = Cow::from(&self.title);
 
         let mut segments: Vec<(Cow<'_, str>, Color, Attribute)> = vec![
             match &self.code {
@@ -172,9 +174,9 @@ impl StatusBarState {
                 None => ("No code".into(), code_fg, Attribute::NormalIntensity),
             },
             (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
-            (title.into(), default_fg, Attribute::NormalIntensity),
+            (title, default_fg, Attribute::NormalIntensity),
             (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
-            (role.into(), default_fg, Attribute::NormalIntensity),
+            (role, default_fg, Attribute::NormalIntensity),
             (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
             (helper_str, helper_fg, Attribute::NormalIntensity),
             (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
@@ -302,6 +304,7 @@ pub struct LocalConsole {
     stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
     stdout_tx: Option<mpsc::Sender<Bytes>>,
     stdout_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    is_utf8: bool,
 
     #[cfg(windows)]
     #[allow(unused)]
@@ -356,6 +359,7 @@ impl LocalConsole {
             stdin_rx: tokio::sync::Mutex::new(stdin_rx),
             stdout_tx: Some(stdout_tx),
             stdout_handle: tokio::sync::Mutex::new(Some(stdout_handle)),
+            is_utf8: supports_unicode(),
 
             #[cfg(windows)]
             win_vt_input: winvt::ConsoleHandle::new()?.enable_virtual_terminal_input()?,
@@ -390,10 +394,9 @@ impl LocalConsole {
             // 1. Render status bar across the FULL PHYSICAL width on Row 0
             statusbar.render_to(&mut buf, phys_cols);
 
-            let is_utf8 = supports_unicode();
-            let v_border = if is_utf8 { "│" } else { "|" };
-            let h_border = if is_utf8 { '─' } else { '-' };
-            let corner_border = if is_utf8 { "┘" } else { "+" };
+            let v_border = if self.is_utf8 { "│" } else { "|" };
+            let h_border = if self.is_utf8 { '─' } else { '-' };
+            let corner_border = if self.is_utf8 { "┘" } else { "+" };
             let border_fg = Color::DarkGrey;
 
             let has_right_border = phys_cols > screen_cols;
@@ -845,7 +848,7 @@ pub fn window_change_signal() -> mpsc::Receiver<()> {
     rx
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum LocalEvent {
     Detach,
     Scroll(i32),
@@ -865,23 +868,30 @@ impl StdinProcessor {
                 row_offset: 1,
                 alt_screen: false,
                 mouse_on: false,
+                app_cursor: false,
                 page_size,
                 events: Vec::new(),
-                pty_output: Vec::new(),
+                pty_output: BytesMut::new(),
             },
             saw_escape: false,
         }
     }
 
-    pub fn set_state(&mut self, alt_screen: bool, mouse_on: bool, page_size: i32) {
+    pub fn set_state(
+        &mut self,
+        alt_screen: bool,
+        mouse_on: bool,
+        page_size: i32,
+        app_cursor: bool,
+    ) {
         self.performer.alt_screen = alt_screen;
         self.performer.mouse_on = mouse_on;
         self.performer.page_size = page_size;
+        self.performer.app_cursor = app_cursor;
     }
 
-    pub fn process(&mut self, incoming: &[u8]) -> (Vec<LocalEvent>, Vec<u8>) {
+    pub fn process(&mut self, incoming: &[u8]) -> (Vec<LocalEvent>, Bytes) {
         self.performer.events.clear();
-        self.performer.pty_output.clear();
 
         for &byte in incoming {
             // Fix for 0x7F (DEL) which VT500 standard ignores silently:
@@ -894,7 +904,7 @@ impl StdinProcessor {
                     self.saw_escape = false;
                 } else {
                     // Regular Backspace (DEL / 0x7F)
-                    self.performer.pty_output.push(0x7f);
+                    self.performer.pty_output.extend_from_slice(&[0x7f]);
                 }
                 continue;
             }
@@ -903,7 +913,7 @@ impl StdinProcessor {
             if byte == 0x1b {
                 if self.saw_escape {
                     // Double escape: flush first escape to PTY
-                    self.performer.pty_output.push(0x1b);
+                    self.performer.pty_output.extend_from_slice(&[0x1b]);
                 }
                 self.saw_escape = true;
                 self.parser.advance(&mut self.performer, &[byte]);
@@ -915,10 +925,10 @@ impl StdinProcessor {
             self.parser.advance(&mut self.performer, &[byte]);
         }
 
-        (
-            std::mem::take(&mut self.performer.events),
-            std::mem::take(&mut self.performer.pty_output),
-        )
+        let events = self.performer.events.clone();
+        let pty_bytes = self.performer.pty_output.split().freeze();
+
+        (events, pty_bytes)
     }
 }
 
@@ -926,9 +936,10 @@ pub struct StdinPerformer {
     pub row_offset: u16,
     pub alt_screen: bool,
     pub mouse_on: bool,
+    pub app_cursor: bool,
     pub page_size: i32,
     pub events: Vec<LocalEvent>,
-    pub pty_output: Vec<u8>,
+    pub pty_output: BytesMut,
 }
 
 impl Perform for StdinPerformer {
@@ -945,7 +956,7 @@ impl Perform for StdinPerformer {
             self.events.push(LocalEvent::Detach);
             return;
         }
-        self.pty_output.push(byte);
+        self.pty_output.extend_from_slice(&[byte]);
     }
 
     // 3. CSI Sequences (Mouse, Arrow keys, PageUp/Down, etc.)
@@ -1012,25 +1023,48 @@ impl Perform for StdinPerformer {
             }
         }
 
-        // --- FALLBACK: Forward any unhandled CSI sequence to PTY ---
+        // --- ARROW KEYS & CURSOR NAVIGATION (Up, Down, Right, Left, Home, End) ---
+        // Handle plain arrows with no explicit parameter or default 0/1 param
+        let is_plain_cursor = intermediates.is_empty()
+            && (p_list.is_empty() || p_list.as_slice() == [[0]] || p_list.as_slice() == [[1]]);
+
+        if is_plain_cursor && matches!(action, 'A' | 'B' | 'C' | 'D' | 'H' | 'F') {
+            if self.app_cursor {
+                // Application Cursor Mode -> \x1bOA .. \x1bOD
+                self.pty_output.extend_from_slice(b"\x1bO");
+                self.pty_output.extend_from_slice(&[action as u8]);
+            } else {
+                // Normal Cursor Mode -> \x1b[A .. \x1b[D (NEVER \x1b[0A!)
+                self.pty_output.extend_from_slice(b"\x1b[");
+                self.pty_output.extend_from_slice(&[action as u8]);
+            }
+            return;
+        }
+
+        // --- FALLBACK: Forward any other CSI sequence to PTY ---
         self.pty_output.extend_from_slice(b"\x1b[");
         self.pty_output.extend_from_slice(intermediates);
-        let mut first = true;
-        for subparam in params.iter() {
-            if !first {
-                self.pty_output.extend_from_slice(b";");
-            }
-            first = false;
-            let mut sub_first = true;
-            for &val in subparam {
-                if !sub_first {
-                    self.pty_output.extend_from_slice(b":");
+
+        // Only serialize parameters if they were explicitly present
+        if !p_list.is_empty() && p_list.as_slice() != [[0]] {
+            let mut first = true;
+            for subparam in params.iter() {
+                if !first {
+                    self.pty_output.extend_from_slice(b";");
                 }
-                sub_first = false;
-                self.pty_output
-                    .extend_from_slice(val.to_string().as_bytes());
+                first = false;
+                let mut sub_first = true;
+                for &val in subparam {
+                    if !sub_first {
+                        self.pty_output.extend_from_slice(b":");
+                    }
+                    sub_first = false;
+                    self.pty_output
+                        .extend_from_slice(val.to_string().as_bytes());
+                }
             }
         }
+
         let mut action_buf = [0u8; 4];
         self.pty_output
             .extend_from_slice(action.encode_utf8(&mut action_buf).as_bytes());
@@ -1038,18 +1072,9 @@ impl Perform for StdinPerformer {
 
     // 4. Escape sequences (e.g. Alt+keys)
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
-        // SS3 sequence: ESC O <char>
-        // Generated by Linux console and DEC terminals for Up/Down/Right/Left/Home/End
-        if intermediates.is_empty() && byte == b'O' && !self.alt_screen {
-            // If we are not in alternate screen, normalize SS3 to standard CSI \x1b[
-            // so shells expecting normal cursor mode never choke or drop \x1bO
-            self.pty_output.extend_from_slice(b"\x1b[");
-            return;
-        }
-
-        self.pty_output.push(0x1b);
+        self.pty_output.extend_from_slice(&[0x1b]);
         self.pty_output.extend_from_slice(intermediates);
-        self.pty_output.push(byte);
+        self.pty_output.extend_from_slice(&[byte]);
     }
 }
 

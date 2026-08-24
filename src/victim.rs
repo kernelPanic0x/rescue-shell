@@ -112,7 +112,6 @@ impl PtySession {
         let shell = find_shell();
         let mut cmd = CommandBuilder::new(&shell);
         cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
         cmd.env("RESCUE_SHELL", std::env::current_exe()?);
         let mut child = pair
             .slave
@@ -272,16 +271,17 @@ impl Victim {
 
                 // Victim local typing -> Send to PTY
                 Some(bytes) = console.read_stdin() => {
-                    let (alt, mouse_on, scrolled) = {
+                    let (alt, mouse_on, scrolled, app_cursor) = {
                         let p = vt_parser.lock().unwrap();
                         (
                             p.screen().alternate_screen(),
                             p.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None,
                             p.screen().scrollback() > 0,
+                            p.screen().application_cursor(), // check DECCKM state
                         )
                     };
 
-                    stdin_processor.set_state(alt, mouse_on, pty_rows as i32);
+                    stdin_processor.set_state(alt, mouse_on, pty_rows as i32, app_cursor);
 
                     // Parse bytes safely (streaming tokenizer)
                     let (events, pty_bytes) = stdin_processor.process(&bytes);
@@ -305,7 +305,7 @@ impl Victim {
                         console.render().await?;
                     }
 
-                    pty.write_input(Bytes::from(pty_bytes)).await?;
+                    pty.write_input(pty_bytes).await?;
                 }
 
                 // Remote messages from Helper -> Send to PTY / Resize

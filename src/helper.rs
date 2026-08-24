@@ -8,7 +8,6 @@ use crate::{
     protocol::{Encoder, HandshakePayload, HelperId, TIMEOUT, TerminalSize, ToHelper, ToVictim},
 };
 use anyhow::{Context, Result, anyhow};
-use bytes::Bytes;
 use crossterm::terminal::size;
 use futures::{SinkExt, StreamExt};
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey, endpoint::presets};
@@ -103,16 +102,17 @@ impl Helper {
 
                 // Raw stdin bytes -> filter -> send to victim
                 Some(bytes) = console.read_stdin() => {
-                    let (alt, mouse_on, scrolled) = {
+                    let (alt, mouse_on, scrolled, app_corsur) = {
                         let p = vt_parser.lock().unwrap();
                         (
                             p.screen().alternate_screen(),
                             p.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None,
                             p.screen().scrollback() > 0,
+                            p.screen().application_cursor(),
                         )
                     };
 
-                    stdin_processor.set_state(alt, mouse_on, pty_rows as i32);
+                    stdin_processor.set_state(alt, mouse_on, pty_rows as i32, app_corsur);
 
                     // Parse bytes safely (streaming tokenizer)
                     let (events, pty_bytes) = stdin_processor.process(&bytes);
@@ -136,7 +136,7 @@ impl Helper {
                         console.render().await?;
                     }
 
-                    hub.send(ToVictim::Data(Bytes::from(pty_bytes))).await?;
+                    hub.send(ToVictim::Data(pty_bytes)).await?;
                 }
 
                 // Window resize signal (SIGWINCH)
