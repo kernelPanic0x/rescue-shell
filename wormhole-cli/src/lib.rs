@@ -1,5 +1,5 @@
 #![expect(clippy::too_many_arguments)]
-mod completer;
+pub mod completer;
 mod util;
 
 use std::{
@@ -16,13 +16,14 @@ use color_eyre::{
 };
 use completer::enter_code;
 use console::{Term, style};
-use futures::{Future, future::Either};
+use futures_util::future::Either;
 use indicatif::{MultiProgress, ProgressBar};
 use magic_wormhole::{
     MailboxConnection, ParseCodeError, ParsePasswordError, Wormhole, forwarding, transfer,
     transit::{self, ConnectionType, TransitInfo},
 };
 use std::{io::Write, path::PathBuf};
+use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tracing_subscriber::EnvFilter;
 
 #[cfg(feature = "clipboard")]
@@ -39,17 +40,15 @@ fn ctrlc_handler() -> Pin<Box<impl Future<Output = ()> + 'static>> {
         let (s, ctrl_c) = async_channel::unbounded();
 
         let handler = move || {
-            smol::block_on(async {
-                if HAS_NOTIFIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    /* Second signal. Exit */
-                    tracing::debug!("Exiting immediately due to Ctrl+C double press");
-                    std::process::exit(130);
-                } else {
-                    /* First signal. */
-                    tracing::info!("Got Ctrl-C event. Press again to exit immediately");
-                    s.try_send(()).ok();
-                }
-            })
+            if HAS_NOTIFIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                /* Second signal. Exit */
+                tracing::debug!("Exiting immediately due to Ctrl+C double press");
+                std::process::exit(130);
+            } else {
+                /* First signal. */
+                tracing::info!("Got Ctrl-C event. Press again to exit immediately");
+                s.try_send(()).ok();
+            }
         };
 
         ctrlc::set_handler(handler).expect("Error setting Ctrl-C handler");
@@ -399,7 +398,7 @@ async fn async_main(argv: Vec<std::ffi::OsString>) -> eyre::Result<i32> {
                     transfer::APP_CONFIG,
                     Some(&sender_print_code),
                 ));
-                match futures::future::select(connect_fut, ctrlc_handler()).await {
+                match futures_util::future::select(connect_fut, ctrlc_handler()).await {
                     Either::Left((result, _)) => result?,
                     Either::Right(((), _)) => return Ok(0),
                 }
@@ -438,7 +437,7 @@ async fn async_main(argv: Vec<std::ffi::OsString>) -> eyre::Result<i32> {
                     transfer::APP_CONFIG,
                     None,
                 ));
-                match futures::future::select(connect_fut, ctrlc_handler()).await {
+                match futures_util::future::select(connect_fut, ctrlc_handler()).await {
                     Either::Left((result, _)) => result?,
                     Either::Right(((), _)) => return Ok(0),
                 }
@@ -520,18 +519,17 @@ async fn async_main(argv: Vec<std::ffi::OsString>) -> eyre::Result<i32> {
                     Some(&server_print_code),
                 ));
                 let (wormhole, _code, relay_hints) =
-                    match futures::future::select(connect_fut, ctrlc_handler()).await {
+                    match futures_util::future::select(connect_fut, ctrlc_handler()).await {
                         Either::Left((result, _)) => result?,
                         Either::Right(((), _)) => break,
                     };
-                smol::spawn(forwarding::serve(
+                tokio::spawn(forwarding::serve(
                     wormhole,
                     &transit_handler,
                     relay_hints,
                     targets.clone(),
                     ctrlc_handler(),
-                ))
-                .detach();
+                ));
             }
         }
         WormholeCommand::Forward(ForwardCommand::Connect {
@@ -756,7 +754,7 @@ async fn make_send_offer(
     for file in &files {
         let path = std::path::PathBuf::from(file);
         eyre::ensure!(
-            smol::unblock(move || path.exists()).await,
+            tokio::fs::try_exists(&path).await.unwrap_or(false),
             "{} does not exist",
             file.display()
         );
@@ -1022,7 +1020,7 @@ async fn send_many(
         writeln!(&mut term, "Sending file to peer").unwrap();
         let pb = create_progress_bar(0);
         let pb = mp.add(pb);
-        smol::spawn(async move {
+        tokio::spawn(async move {
             let pb2 = pb.clone();
             let result = async move {
                 transfer::send(
@@ -1047,8 +1045,7 @@ async fn send_many(
                     tracing::error!("Send failed, {}", e);
                 }
             };
-        })
-        .detach();
+        });
         Ok(())
     }
 
@@ -1098,7 +1095,7 @@ async fn receive_inner_v1(
     target_dir: &std::path::Path,
     noconfirm: bool,
 ) -> eyre::Result<()> {
-    use smol::fs::OpenOptions;
+    use tokio::fs::OpenOptions;
 
     /*
      * Control flow is a bit tricky here:
@@ -1152,7 +1149,8 @@ async fn receive_inner_v1(
             .create_new(true)
             .open(&file_path)
             .await
-            .context("Failed to create destination file")?;
+            .context("Failed to create destination file")?
+            .compat_write();
         return req
             .accept(
                 &transit_handler,
@@ -1186,7 +1184,8 @@ async fn receive_inner_v1(
         .create(true)
         .truncate(true)
         .open(&file_path)
-        .await?;
+        .await?
+        .compat_write();
     req.accept(
         &transit_handler,
         create_progress_handler(pb),
@@ -1238,7 +1237,7 @@ async fn receive_inner_v2(
         "wormhole-tmp-{:06}",
         rand::thread_rng().gen_range(0..1_000_000)
     ));
-    smol::fs::create_dir_all(&tmp_dir)
+    tokio::fs::create_dir_all(&tmp_dir)
         .await
         .context("Failed to create temporary directory for receiving")?;
 
@@ -1258,7 +1257,7 @@ async fn receive_inner_v2(
 
     /* Move the received files to their target location */
     use futures::TryStreamExt;
-    smol::fs::read_dir(&tmp_dir)
+    tokio::fs::read_dir(&tmp_dir)
     .await?
     .map_err(Into::into)
     .and_then(|file| {
@@ -1271,14 +1270,14 @@ async fn receive_inner_v2(
             /* This suffers some TOCTTOU, sorry about that: https://internals.rust-lang.org/t/rename-file-without-overriding-existing-target/17637 */
             let path = std::path::PathBuf::from(&target_path);
             let dest = path.clone();
-            if smol::unblock(move || dest.exists()).await {
+            if tokio::unblock(move || dest.exists()).await {
                 eyre::bail!(
                     "Target destination {} exists, you can manually extract the file from {}",
                     target_path.display(),
                     tmp_dir.display(),
                 );
             } else {
-                smol::fs::rename(&path, &target_path).await?;
+                tokio::fs::rename(&path, &target_path).await?;
             }
             Ok(())
         }})
@@ -1286,7 +1285,7 @@ async fn receive_inner_v2(
     .await?;
 
     /* Delete the temporary directory */
-    smol::fs::remove_dir_all(&tmp_dir).await.context(format!(
+    tokio::fs::remove_dir_all(&tmp_dir).await.context(format!(
         "Failed to delete {}, please do it manually",
         tmp_dir.display()
     ))?;

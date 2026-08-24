@@ -30,20 +30,20 @@ impl TerminalSize {
 }
 
 pub trait Encoder: Sized {
-    fn encode(&self) -> anyhow::Result<Bytes>;
-    fn decode(bytes: &[u8]) -> anyhow::Result<Self>;
+    fn encode(&self) -> color_eyre::Result<Bytes>;
+    fn decode(bytes: &[u8]) -> color_eyre::Result<Self>;
 }
 
 impl<T> Encoder for T
 where
     T: Serialize<Src = T> + for<'de> Deserialize<'de, Dst = T>,
 {
-    fn encode(&self) -> anyhow::Result<Bytes> {
+    fn encode(&self) -> color_eyre::Result<Bytes> {
         let serialized = wincode::serialize(self)?;
         Ok(Bytes::from(serialized))
     }
 
-    fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+    fn decode(bytes: &[u8]) -> color_eyre::Result<Self> {
         let msg = wincode::deserialize(bytes)?;
         Ok(msg)
     }

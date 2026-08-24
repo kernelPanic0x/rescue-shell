@@ -7,9 +7,9 @@ use crate::{
     },
     protocol::{Encoder, HandshakePayload, HelperId, TIMEOUT, TerminalSize, ToHelper, ToVictim},
 };
-use anyhow::{Context, Result, anyhow};
+use color_eyre::eyre::{Context, eyre};
 use crossterm::terminal::size;
-use futures::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey, endpoint::presets};
 use magic_wormhole::{MailboxConnection, Wormhole};
 use std::{
@@ -27,7 +27,10 @@ pub struct VictimHub {
 }
 
 impl VictimHub {
-    pub async fn connect(args: ConnectArgs, statusbar_handle: StatusBarHandle) -> Result<Self> {
+    pub async fn connect(
+        args: ConnectArgs,
+        statusbar_handle: StatusBarHandle,
+    ) -> color_eyre::Result<Self> {
         let (to_victim_tx, to_victim_rx) = mpsc::channel::<ToVictim>(1024);
         let (from_victim_tx, from_victim_rx) = mpsc::channel::<ToHelper>(1024);
 
@@ -40,8 +43,8 @@ impl VictimHub {
         })
     }
 
-    pub async fn send(&self, msg: ToVictim) -> Result<()> {
-        self.to_victim_tx.send(msg).await.map_err(|e| anyhow!(e))
+    pub async fn send(&self, msg: ToVictim) -> color_eyre::Result<()> {
+        self.to_victim_tx.send(msg).await.map_err(|e| eyre!(e))
     }
 
     pub async fn recv(&self) -> Option<ToHelper> {
@@ -59,7 +62,7 @@ impl VictimHub {
 pub struct Helper;
 
 impl Helper {
-    pub async fn run(args: ConnectArgs) -> Result<()> {
+    pub async fn run(args: ConnectArgs) -> color_eyre::Result<()> {
         let id = getrandom::u64()?.into();
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
@@ -88,7 +91,7 @@ impl Helper {
         let mut stdin_processor = StdinProcessor::new(pty_rows as i32);
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
 
-        let res: Result<()> = 'main_loop: loop {
+        let res: color_eyre::Result<()> = 'main_loop: loop {
             tokio::select! {
                 // Peroidically resend term size to keep TermSizeNegotiator alive
                 _ = screen_size_resend.tick() => {
@@ -174,7 +177,7 @@ impl Helper {
                             vt_parser.lock().unwrap().screen_mut().set_scrollback(offset as usize);
                             console.render().await?;
                         }
-                        None => break Err(anyhow!("channel closed")).context("Recv from victim"),
+                        None => break Err(eyre!("channel closed")).context("Recv from victim"),
                     }
                 }
             }
@@ -190,7 +193,7 @@ impl Helper {
 struct Link {
     #[allow(unused)]
     endpoint: Endpoint,
-    writer_handle: Mutex<Option<tokio::task::JoinHandle<Result<()>>>>,
+    writer_handle: Mutex<Option<tokio::task::JoinHandle<color_eyre::Result<()>>>>,
 }
 
 impl Link {
@@ -199,7 +202,7 @@ impl Link {
         statusbar_handle: StatusBarHandle,
         mut to_victim_rx: mpsc::Receiver<ToVictim>,
         from_victim_tx: mpsc::Sender<ToHelper>,
-    ) -> anyhow::Result<Self> {
+    ) -> color_eyre::Result<Self> {
         let secret_key = args
             .common
             .private_key
@@ -294,7 +297,7 @@ impl Link {
             let _ = raw_writer.flush().await;
             let _ = raw_writer.close().await;
 
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), color_eyre::eyre::Error>(())
         });
 
         Ok(Self {

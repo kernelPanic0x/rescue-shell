@@ -1,6 +1,5 @@
 // src/main.rs
 mod common;
-mod completer;
 mod console;
 mod helper;
 mod io;
@@ -9,8 +8,8 @@ mod victim;
 
 use std::{borrow::Cow, path::PathBuf};
 
-use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
+use color_eyre::eyre::Context;
 use iroh::{PublicKey, SecretKey};
 use magic_wormhole::{AppID, Code, transfer::APP_CONFIG};
 
@@ -115,7 +114,7 @@ struct ServeArgs {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
 
     match cli.cmd {
@@ -131,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Connect(mut args) => {
             if args.common.code.is_none() {
-                args.common.code = Some(completer::enter_code()?.parse()?);
+                args.common.code = Some(wormhole_cli::completer::enter_code()?.parse()?);
             }
 
             Helper::run(args).await?

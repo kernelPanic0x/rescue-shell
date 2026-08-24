@@ -1,19 +1,20 @@
 [package]
 name = "wormhole-cli"
-version = "0.8.1"     # tracks the upstream magic-wormhole-cli version you vendored
-edition = "2024"      # match upstream; per-crate, so your root crate can stay on 2021
+version = "0.8.1"
+edition = "2024"
 publish = false
 
 [dependencies]
 magic-wormhole = { workspace = true, features = ["forwarding"] }
-smol = "2"
-futures = "0.3"
+tokio = { workspace = true }
+tokio-util = { workspace = true }
 rand = "0.8"
+futures-util = { workspace = true }
 async-channel = "2"
 console = "0.16"
 indicatif = "0.18"
-dialoguer = { version = "0.12", features = ["completion"] }
-color-eyre = "0.6"
+dialoguer = { workspace = true }
+color-eyre = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"
 unit-prefix = "0.5"

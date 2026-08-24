@@ -1,5 +1,5 @@
-use anyhow::Context;
 use base64::prelude::*;
+use color_eyre::eyre::{Context, eyre};
 use iroh::{PublicKey, SecretKey};
 use std::{
     io::{Read, Write, stdin, stdout},
@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 
-pub fn copy_to_osc52() -> anyhow::Result<()> {
+pub fn copy_to_osc52() -> color_eyre::Result<()> {
     let mut buffer = Vec::new();
     stdin().read_to_end(&mut buffer)?;
 
@@ -24,7 +24,7 @@ pub fn copy_to_osc52() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn gen_public_key() -> anyhow::Result<()> {
+pub fn gen_public_key() -> color_eyre::Result<()> {
     let mut input = String::new();
     stdin()
         .read_to_string(&mut input)
@@ -34,7 +34,7 @@ pub fn gen_public_key() -> anyhow::Result<()> {
     let bytes = hex::decode(trimmed).context("Invalid hex input")?;
 
     let secret_key = SecretKey::try_from(bytes.as_slice())
-        .map_err(|e| anyhow::anyhow!("Invalid secret key bytes: {e}"))?;
+        .map_err(|e| eyre!("Invalid secret key bytes: {e}"))?;
 
     let public_key = secret_key.public();
 
@@ -49,7 +49,7 @@ pub fn gen_secret_key() {
     println!("{}", hex);
 }
 
-pub fn read_public_keys_file(path: &PathBuf) -> anyhow::Result<Vec<PublicKey>> {
+pub fn read_public_keys_file(path: &PathBuf) -> color_eyre::Result<Vec<PublicKey>> {
     let contents = std::fs::read_to_string(path)?;
 
     let pub_keys = contents

@@ -5,11 +5,11 @@ use crate::console::{
 };
 use crate::protocol::{Encoder, HandshakePayload, TIMEOUT, TerminalSize, ToHelper, ToVictim};
 use crate::{ServeArgs, app_config};
-use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
+use color_eyre::eyre::{Context, eyre};
 use crossterm::queue;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, size};
-use futures::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use iroh::{
     Endpoint, SecretKey,
     endpoint::{Connection, presets},
@@ -38,7 +38,7 @@ impl HelperHub {
         args: ServeArgs,
         statusbar_handle: StatusBarHandle,
         vt_parser: Arc<Mutex<vt100::Parser>>,
-    ) -> Result<Self> {
+    ) -> color_eyre::Result<Self> {
         let (to_helpers, _) = broadcast::channel(1024);
         let (from_helpers_tx, from_helpers_rx) = mpsc::channel(1024);
 
@@ -100,14 +100,16 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    pub fn spawn(cols: u16, rows: u16) -> Result<Self> {
+    pub fn spawn(cols: u16, rows: u16) -> color_eyre::Result<Self> {
         let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| eyre!("{e}"))?;
 
         let shell = find_shell();
         let mut cmd = CommandBuilder::new(&shell);
@@ -116,12 +118,13 @@ impl PtySession {
         let mut child = pair
             .slave
             .spawn_command(cmd)
+            .map_err(|e| eyre!("{e}"))
             .with_context(|| format!("failed to spawn {shell}"))?;
         drop(pair.slave);
 
         let master = pair.master;
-        let mut pty_reader = master.try_clone_reader()?;
-        let mut pty_writer = master.take_writer()?;
+        let mut pty_reader = master.try_clone_reader().map_err(|e| eyre!("{e}"))?;
+        let mut pty_writer = master.take_writer().map_err(|e| eyre!("{e}"))?;
 
         let (pty_out_tx, pty_out_rx) = mpsc::channel::<Vec<u8>>(64);
         tokio::task::spawn_blocking(move || {
@@ -161,28 +164,30 @@ impl PtySession {
         self.pty_out_rx.lock().await.recv().await
     }
 
-    pub async fn write_input(&self, bytes: Bytes) -> Result<()> {
-        self.to_pty_tx.send(bytes).await.map_err(|e| anyhow!(e))
+    pub async fn write_input(&self, bytes: Bytes) -> color_eyre::Result<()> {
+        self.to_pty_tx.send(bytes).await.map_err(|e| eyre!(e))
     }
 
-    pub fn resize(&self, size: TerminalSize) -> Result<()> {
-        self.master.resize(PtySize {
-            rows: size.pty_rows,
-            cols: size.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+    pub fn resize(&self, size: TerminalSize) -> color_eyre::Result<()> {
+        self.master
+            .resize(PtySize {
+                rows: size.pty_rows,
+                cols: size.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| eyre!("Failed to resize pty: {}", e))?;
         Ok(())
     }
 
-    pub async fn wait_exit(&self) -> Result<()> {
+    pub async fn wait_exit(&self) -> color_eyre::Result<()> {
         let mut handle = self.child_exit.lock().await;
 
         if let Some(handle) = handle.as_mut() {
             match handle.await {
                 Ok(Ok(_)) => Ok(()),
-                Ok(Err(e)) => Err(anyhow!("wait failed: {e}")),
-                Err(e) => Err(anyhow!("join failed: {e}")),
+                Ok(Err(e)) => Err(eyre!("wait failed: {e}")),
+                Err(e) => Err(eyre!("join failed: {e}")),
             }
         } else {
             unreachable!("handle already taken")
@@ -197,7 +202,7 @@ pub struct Victim {
 }
 
 impl Victim {
-    pub async fn run(args: ServeArgs) -> Result<()> {
+    pub async fn run(args: ServeArgs) -> color_eyre::Result<()> {
         let (mut cols, mut rows) = size()?;
         let mut pty_rows = rows.saturating_sub(1).max(1);
         let mut size_negotiator = TerminalSizeNegotiator::new(TerminalSize { cols, pty_rows });
@@ -223,7 +228,7 @@ impl Victim {
         let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
         let mut old_connected = 0;
 
-        let res: Result<()> = 'main_loop: loop {
+        let res: color_eyre::Result<()> = 'main_loop: loop {
             tokio::select! {
                 // Peroidically resend term size
                 _ = screen_size_resend.tick() => {
@@ -409,7 +414,7 @@ impl Protocol {
         statusbar_handle: StatusBarHandle,
         vt_parser: Arc<Mutex<vt100::Parser>>,
         authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
-    ) -> anyhow::Result<Self> {
+    ) -> color_eyre::Result<Self> {
         Ok(Self {
             authenticated_peer,
             allowed_peers,
@@ -485,13 +490,13 @@ impl ProtocolHandler for Protocol {
 
         let helper_victim = tokio::spawn(async move {
             loop {
-                let bytes = raw_reader.next().await.ok_or(anyhow!("reader is none"))??;
+                let bytes = raw_reader.next().await.ok_or(eyre!("reader is none"))??;
                 let msg = ToVictim::decode(&bytes)?;
                 from_helper.send(msg).await?;
             }
 
             #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), color_eyre::eyre::Error>(())
         });
 
         let victim_helper = tokio::spawn(async move {
@@ -501,7 +506,7 @@ impl ProtocolHandler for Protocol {
                         raw_writer.send(msg.encode()?).await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        return Err(anyhow!("Helper lagged behind by {n} frames"));
+                        return Err(eyre!("Helper lagged behind by {n} frames"));
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -511,10 +516,11 @@ impl ProtocolHandler for Protocol {
             let _ = raw_writer.flush().await;
             let _ = raw_writer.close().await;
 
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), color_eyre::eyre::Error>(())
         });
 
-        let (res, _, _) = futures::future::select_all(vec![victim_helper, helper_victim]).await;
+        let (res, _, _) =
+            futures_util::future::select_all(vec![victim_helper, helper_victim]).await;
         if let Err(e) = res {
             return Err(AcceptError::User {
                 source: n0_error::AnyError::from_std(e),
@@ -540,7 +546,7 @@ impl Link {
         protocol: Protocol,
         statusbar_handle: StatusBarHandle,
         authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
-    ) -> anyhow::Result<Self> {
+    ) -> color_eyre::Result<Self> {
         let secret_key = args
             .common
             .private_key
@@ -589,7 +595,7 @@ impl Link {
 
         tokio::task::spawn(async move {
             loop {
-                let res: Result<()> = async {
+                let res: color_eyre::Result<()> = async {
                     let mailbox = match &args.common.code {
                         Some(code) => {
                             MailboxConnection::connect(
@@ -632,7 +638,7 @@ impl Link {
                         )
                         .await
                         .map_err(|_| {
-                            anyhow!("Helper connected via wormhole but timed out dialing QUIC")
+                            eyre!("Helper connected via wormhole but timed out dialing QUIC")
                         })??;
 
                         statusbar_handle.set_code(None);
@@ -655,7 +661,7 @@ impl Link {
                 }
             }
             #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), color_eyre::eyre::Error>(())
         });
 
         Ok(Self { secret_key, router })

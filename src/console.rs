@@ -7,8 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::anyhow;
 use bytes::{BufMut, Bytes, BytesMut};
+use color_eyre::eyre::eyre;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::DisableMouseCapture,
@@ -327,7 +327,7 @@ impl LocalConsole {
     pub fn new(
         current_parser: Arc<Mutex<vt100::Parser>>,
         statusbar_handle: &StatusBarHandle,
-    ) -> anyhow::Result<Self> {
+    ) -> color_eyre::Result<Self> {
         enable_raw_mode()?;
         execute!(std::io::stdout(), EnterAlternateScreen)?;
 
@@ -380,7 +380,7 @@ impl LocalConsole {
         })
     }
 
-    pub async fn render(&mut self) -> anyhow::Result<()> {
+    pub async fn render(&mut self) -> color_eyre::Result<()> {
         let (phys_cols, phys_rows) = crossterm::terminal::size()?;
 
         let buf = {
@@ -578,13 +578,13 @@ impl LocalConsole {
         self.stdin_rx.lock().await.recv().await
     }
 
-    pub async fn write_stdout(&self, bytes: Bytes) -> anyhow::Result<()> {
+    pub async fn write_stdout(&self, bytes: Bytes) -> color_eyre::Result<()> {
         self.stdout_tx
             .as_ref()
-            .ok_or_else(|| anyhow!("Console stdout closed"))?
+            .ok_or_else(|| eyre!("Console stdout closed"))?
             .send(bytes)
             .await
-            .map_err(|e| anyhow!(e))
+            .map_err(|e| eyre!(e))
     }
 
     pub async fn flush_and_close(mut self) {

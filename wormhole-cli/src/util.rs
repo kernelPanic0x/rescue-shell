@@ -1,7 +1,4 @@
-use smol::{
-    Unblock,
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub async fn ask_user(message: impl std::fmt::Display, default_answer: bool) -> bool {
     let message = format!(
@@ -11,11 +8,11 @@ pub async fn ask_user(message: impl std::fmt::Display, default_answer: bool) -> 
         if default_answer { "n" } else { "N" }
     );
 
-    let mut stdout = Unblock::new(std::io::stdout());
-    let mut stdin = BufReader::new(Unblock::new(std::io::stdin()));
+    let mut stdout = tokio::io::stdout();
+    let mut stdin = BufReader::new(tokio::io::stdin());
 
     loop {
-        stdout.write(message.as_bytes()).await.unwrap();
+        stdout.write_all(message.as_bytes()).await.unwrap();
         stdout.flush().await.unwrap();
 
         let mut answer = String::new();
@@ -27,12 +24,12 @@ pub async fn ask_user(message: impl std::fmt::Display, default_answer: bool) -> 
             "" => break default_answer,
             _ => {
                 stdout
-                    .write("Please type y or n!\n".as_bytes())
+                    .write_all("Please type y or n!\n".as_bytes())
                     .await
                     .unwrap();
                 stdout.flush().await.unwrap();
                 continue;
-            },
+            }
         };
     }
 }
@@ -43,9 +40,9 @@ pub async fn cancellable<T>(
     future: impl Future<Output = T> + Unpin,
     cancel: impl Future<Output = ()>,
 ) -> Result<T, Cancelled> {
-    use futures::future::Either;
-    futures::pin_mut!(cancel);
-    match futures::future::select(future, cancel).await {
+    use futures_util::future::Either;
+    futures_util::pin_mut!(cancel);
+    match futures_util::future::select(future, cancel).await {
         Either::Left((val, _)) => Ok(val),
         Either::Right(((), _)) => Err(Cancelled),
     }
