@@ -31,26 +31,60 @@ Get a **remote rescue shell** over [magic-wormhole](https://github.com/magic-wor
 ## 🚀 Quick Start
 
 ### 🛟 1. On the machine needing help:
+
+Linux, FreeBSD, MacOS:
 ```sh
 curl -sL https://run.any64.de | sh
 ```
 
-or directly from github:
+Windows:
+```powershell
+irm https://run.any64.de | iex
+```
+
+<details>
+<summary>Or directly from github...</summary>
+
+Linux, FreeBSD, MacOS:
 ```sh
 curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | sh
 ```
 
+Windows:
+```powershell
+irm https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.ps1 | iex
+```
+
+</details>
+
 It will display a one-time code (e.g., `7-guitar-battery`).
 
 ### ⛑️ 2. On the machine helping:
+
+Linux, FreeBSD, MacOS:
 ```sh
 curl -sL https://run.any64.de | sh -s -- connect
 ```
 
-or directly from github:
+Windows:
+```powershell
+& { $(irm https://run.any64.de) } connect
+```
+
+<details>
+<summary>Or directly from github...</summary>
+
+Linux, FreeBSD, MacOS:
 ```sh
 curl -sL https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.sh | sh -s -- connect
 ```
+
+Windows:
+```powershell
+& { $(irm https://raw.githubusercontent.com/kernelPanic0x/rescue-shell/main/install.ps1) } connect
+```
+
+</details>
 
 Enter the code when prompted.
 
@@ -64,7 +98,7 @@ Use `SHELL` environment variable to set a shell manually. It also sets `RESCUE_S
 | `$RESCUE_SHELL serve [OPTIONS]` | Host a session (Victim) |
 | `$RESCUE_SHELL connect [OPTIONS]` | Connect to a session (Helper) |
 | `$RESCUE_SHELL copy` | Copy stdin to OSC52 for remote clipboard |
-| `$RESCUE_SHELL wormhole <COMMAND> [OPTIONS]` | full wormhole-rs cli version 0.8.1 included |
+| `$RESCUE_SHELL wormhole <COMMAND> [OPTIONS]` | Full wormhole-rs cli version 0.8.1 included |
 
 ## 🧪 Tested platforms
 
