@@ -219,6 +219,23 @@ impl Link {
 
         wormhole.send(public_key.to_vec()).await?;
 
+        #[cfg(target_os = "android")]
+        let endpoint = {
+            use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+            use iroh::dns::DnsResolver;
+
+            Endpoint::builder(presets::Minimal)
+                .secret_key(secret_key)
+                .dns_resolver(DnsResolver::with_nameserver(SocketAddr::V4(
+                    SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 53),
+                )))
+                .relay_mode(RelayMode::Default)
+                .bind()
+                .await?
+        };
+
+        #[cfg(not(target_os = "android"))]
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(secret_key)
             .relay_mode(RelayMode::Default)

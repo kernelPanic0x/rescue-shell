@@ -547,14 +547,29 @@ impl Link {
             .clone()
             .unwrap_or_else(SecretKey::generate);
 
+        #[cfg(target_os = "android")]
+        let endpoint = {
+            use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+            use iroh::dns::DnsResolver;
+
+            Endpoint::builder(presets::Minimal)
+                .secret_key(secret_key.clone())
+                .dns_resolver(DnsResolver::with_nameserver(SocketAddr::V4(
+                    SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 53),
+                )))
+                .relay_mode(RelayMode::Default)
+                .bind()
+                .await?
+        };
+
+        #[cfg(not(target_os = "android"))]
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(secret_key.clone())
-            // 1. Enable relay & STUN (needed for hole punching & fallback)
             .relay_mode(RelayMode::Default)
             .bind()
             .await?;
 
-        // 2. Wait until STUN and Relay discovery are complete
         endpoint.online().await;
 
         let my_addr = endpoint.addr();
