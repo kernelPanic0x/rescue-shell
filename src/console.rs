@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::anyhow;
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::DisableMouseCapture,
@@ -121,7 +121,7 @@ impl StatusBarState {
         }
     }
 
-    pub fn render_to(&self, buf: &mut Vec<u8>, cols: u16) {
+    pub fn render_to(&self, buf: &mut BytesMut, cols: u16) {
         let width = cols as usize;
 
         // --- PALETTE FALLBACKS ---
@@ -219,17 +219,22 @@ impl StatusBarState {
             .take(width)
             .collect();
 
-        let _ = queue!(buf, MoveTo(0, 0), SetBackgroundColor(bar_bg));
+        let _ = queue!(buf.writer(), MoveTo(0, 0), SetBackgroundColor(bar_bg));
 
         for chunk in visible_window.chunk_by(|a, b| a.1 == b.1 && a.2 == b.2) {
             let fg = chunk[0].1;
             let attr = chunk[0].2;
             let text: String = chunk.iter().map(|(c, _, _)| c).collect();
 
-            let _ = queue!(buf, SetForegroundColor(fg), SetAttribute(attr), Print(text));
+            let _ = queue!(
+                buf.writer(),
+                SetForegroundColor(fg),
+                SetAttribute(attr),
+                Print(text)
+            );
         }
 
-        let _ = queue!(buf, ResetColor, SetAttribute(Attribute::Reset));
+        let _ = queue!(buf.writer(), ResetColor, SetAttribute(Attribute::Reset));
     }
 }
 
@@ -311,8 +316,10 @@ pub struct LocalConsole {
     win_vt_input: winvt::ConsoleHandle,
 
     parser: Arc<Mutex<vt100::Parser>>,
-    prev_screen: Option<vt100::Screen>,
+    prev_screen: Vec<BytesMut>,
+    buf: BytesMut,
     prev_physical_size: Option<(u16, u16)>,
+    prev_virtual_size: Option<(u16, u16)>,
     statusbar_rx: watch::Receiver<StatusBarState>,
 }
 
@@ -365,8 +372,10 @@ impl LocalConsole {
             win_vt_input: winvt::ConsoleHandle::new()?.enable_virtual_terminal_input()?,
 
             parser: current_parser,
-            prev_screen: None,
+            prev_screen: Vec::new(),
+            buf: BytesMut::new(),
             prev_physical_size: None,
+            prev_virtual_size: None,
             statusbar_rx: statusbar_handle.subscribe(),
         })
     }
@@ -380,19 +389,18 @@ impl LocalConsole {
             let (screen_rows, screen_cols) = screen.size();
 
             // Trigger full redraw if either virtual VT size OR physical terminal dimensions change
-            let size_changed = match (&self.prev_screen, self.prev_physical_size) {
-                (Some(s), Some(prev_phys)) => {
-                    screen.size() != s.size() || (phys_cols, phys_rows) != prev_phys
+            let size_changed = match (self.prev_virtual_size, self.prev_physical_size) {
+                (Some(prev_virt), Some(prev_phys)) => {
+                    (screen_rows, screen_cols) != prev_virt || (phys_cols, phys_rows) != prev_phys
                 }
                 _ => true,
             };
 
             let scrolled = screen.scrollback() > 0;
             let statusbar = self.statusbar_rx.borrow();
-            let mut buf = Vec::new();
 
             // 1. Render status bar across the FULL PHYSICAL width on Row 0
-            statusbar.render_to(&mut buf, phys_cols);
+            statusbar.render_to(&mut self.buf, phys_cols);
 
             let v_border = if self.is_utf8 { "│" } else { "|" };
             let h_border = if self.is_utf8 { '─' } else { '-' };
@@ -403,8 +411,11 @@ impl LocalConsole {
             let has_bottom_border = phys_rows > screen_rows + 1;
 
             // 2. Render screen contents (Full redraw vs. Diff)
-            if size_changed || self.prev_screen.is_none() {
-                buf.extend_from_slice(&screen.input_mode_formatted());
+            if size_changed || self.prev_screen.is_empty() {
+                self.buf.extend_from_slice(&screen.input_mode_formatted());
+                self.buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
+
+                let mut new_prev_screen = Vec::with_capacity(screen_rows as usize);
 
                 for (r, row_bytes) in screen.rows_formatted(0, screen_cols).enumerate() {
                     let physical_row = (r as u16) + 1;
@@ -413,19 +424,19 @@ impl LocalConsole {
                     }
 
                     let _ = queue!(
-                        buf,
+                        (&mut self.buf).writer(),
                         MoveTo(0, physical_row),
                         ResetColor,
                         SetAttribute(Attribute::Reset),
                         Clear(ClearType::UntilNewLine)
                     );
 
-                    buf.extend_from_slice(&row_bytes);
+                    self.buf.extend_from_slice(&row_bytes);
 
                     // Draw vertical right border and clear margin with default background
                     if has_right_border {
                         let _ = queue!(
-                            buf,
+                            (&mut self.buf).writer(),
                             MoveTo(screen_cols, physical_row),
                             ResetColor,
                             SetForegroundColor(border_fg),
@@ -435,6 +446,10 @@ impl LocalConsole {
                             Clear(ClearType::UntilNewLine)
                         );
                     }
+
+                    let mut row_buf = BytesMut::with_capacity(row_bytes.len());
+                    row_buf.extend_from_slice(&row_bytes);
+                    new_prev_screen.push(row_buf);
                 }
 
                 // Draw horizontal bottom border (tmux style)
@@ -444,7 +459,7 @@ impl LocalConsole {
                         std::iter::repeat_n(h_border, screen_cols as usize).collect();
 
                     let _ = queue!(
-                        buf,
+                        (&mut self.buf).writer(),
                         MoveTo(0, border_row),
                         ResetColor,
                         SetForegroundColor(border_fg),
@@ -454,19 +469,23 @@ impl LocalConsole {
 
                     if has_right_border {
                         let _ = queue!(
-                            buf,
+                            (&mut self.buf).writer(),
                             Print(corner_border),
                             ResetColor,
                             Clear(ClearType::UntilNewLine)
                         );
                     } else {
-                        let _ = queue!(buf, ResetColor, Clear(ClearType::UntilNewLine));
+                        let _ = queue!(
+                            (&mut self.buf).writer(),
+                            ResetColor,
+                            Clear(ClearType::UntilNewLine)
+                        );
                     }
 
                     // Clear any remaining lines below the bottom border
                     for r in (border_row + 1)..phys_rows {
                         let _ = queue!(
-                            buf,
+                            (&mut self.buf).writer(),
                             MoveTo(0, r),
                             ResetColor,
                             SetAttribute(Attribute::Reset),
@@ -474,41 +493,41 @@ impl LocalConsole {
                         );
                     }
                 }
-            } else if let Some(s) = &self.prev_screen {
-                let input_diff = screen.input_mode_diff(s);
-                if !input_diff.is_empty() {
-                    buf.extend_from_slice(&input_diff);
-                    buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
+
+                self.prev_screen = new_prev_screen;
+            } else {
+                // Ensure prev_screen has enough slot capacity if row count grew
+                if self.prev_screen.len() < screen_rows as usize {
+                    self.prev_screen
+                        .resize_with(screen_rows as usize, BytesMut::new);
                 }
 
-                // O(N) linear pass: pair current rows with previous rows directly
-                let curr_rows = screen.rows_formatted(0, screen_cols);
-                let prev_rows = s.rows_formatted(0, screen_cols);
-
-                for (r, (row_bytes, prev_row_bytes)) in curr_rows.zip(prev_rows).enumerate() {
+                for (r, row_bytes) in screen.rows_formatted(0, screen_cols).enumerate() {
                     let physical_row = (r as u16) + 1;
                     if physical_row >= phys_rows {
                         break;
                     }
 
-                    // Only repaint rows whose contents actually changed
-                    if row_bytes == prev_row_bytes {
-                        continue;
+                    // Compare against cached previous row
+                    if let Some(prev_row) = self.prev_screen.get(r)
+                        && prev_row.as_ref() == row_bytes.as_slice()
+                    {
+                        continue; // Unchanged row, skip rendering!
                     }
 
                     let _ = queue!(
-                        buf,
+                        (&mut self.buf).writer(),
                         MoveTo(0, physical_row),
                         ResetColor,
                         SetAttribute(Attribute::Reset),
                         Clear(ClearType::UntilNewLine)
                     );
 
-                    buf.extend_from_slice(&row_bytes);
+                    self.buf.extend_from_slice(&row_bytes);
 
                     if has_right_border {
                         let _ = queue!(
-                            buf,
+                            (&mut self.buf).writer(),
                             MoveTo(screen_cols, physical_row),
                             ResetColor,
                             SetForegroundColor(border_fg),
@@ -517,6 +536,12 @@ impl LocalConsole {
                             ResetColor,
                             Clear(ClearType::UntilNewLine)
                         );
+                    }
+
+                    // Update cached row in-place (re-using existing BytesMut capacity)
+                    if let Some(prev_row) = self.prev_screen.get_mut(r) {
+                        prev_row.clear();
+                        prev_row.extend_from_slice(&row_bytes);
                     }
                 }
             }
@@ -527,7 +552,7 @@ impl LocalConsole {
                 let target_c = cur_c.min(screen_cols.saturating_sub(1));
                 let target_r = (cur_r + 1).min(phys_rows.saturating_sub(1));
                 let _ = queue!(
-                    buf,
+                    (&mut self.buf).writer(),
                     ResetColor,
                     SetAttribute(Attribute::Reset),
                     MoveTo(target_c, target_r)
@@ -535,15 +560,15 @@ impl LocalConsole {
             }
 
             if scrolled || screen.hide_cursor() {
-                let _ = queue!(buf, Hide);
+                let _ = queue!((&mut self.buf).writer(), Hide);
             } else {
-                let _ = queue!(buf, Show);
+                let _ = queue!((&mut self.buf).writer(), Show);
             }
 
-            self.prev_screen = Some(screen.clone());
+            self.prev_virtual_size = Some((screen_rows, screen_cols));
             self.prev_physical_size = Some((phys_cols, phys_rows));
 
-            Bytes::from(buf)
+            self.buf.split().freeze()
         };
 
         self.write_stdout(buf).await
