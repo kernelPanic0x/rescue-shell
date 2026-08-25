@@ -844,6 +844,9 @@ mod winvt {
         original_mode: CONSOLE_MODE,
     }
 
+    unsafe impl Send for ConsoleHandle {}
+    unsafe impl Sync for ConsoleHandle {}
+
     impl ConsoleHandle {
         pub fn new() -> std::io::Result<Self> {
             let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
