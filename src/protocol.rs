@@ -14,17 +14,18 @@ impl From<u64> for HelperId {
     }
 }
 
-#[derive(SchemaWrite, SchemaRead, Debug, Clone, Copy, Default)]
-pub struct TerminalSize {
+/// Full terminal screen size
+#[derive(SchemaRead, SchemaWrite, Debug, Clone, Copy, Default)]
+pub struct PtySize {
     pub cols: u16,
-    pub pty_rows: u16,
+    pub rows: u16,
 }
 
-impl TerminalSize {
+impl PtySize {
     pub fn min_dimensions(self, other: Self) -> Self {
-        TerminalSize {
+        PtySize {
             cols: self.cols.min(other.cols),
-            pty_rows: self.pty_rows.min(other.pty_rows),
+            rows: self.rows.min(other.rows),
         }
     }
 }
@@ -52,7 +53,7 @@ where
 #[derive(SchemaWrite, SchemaRead, Debug, Clone)]
 pub enum ToVictim {
     Data(Bytes),
-    SizeHint { id: HelperId, size: TerminalSize },
+    SizeHint { id: HelperId, size: PtySize },
     Bye { id: HelperId },
     RequestScrollTo { offset: u32 },
 }
@@ -60,7 +61,7 @@ pub enum ToVictim {
 #[derive(SchemaWrite, SchemaRead, Debug, Clone)]
 pub enum ToHelper {
     Data(Bytes),
-    SetSize(TerminalSize),
+    SetSize(PtySize),
     Bye,
     ConnectedHelpers(u8),
     ScrollTo { offset: u32 },

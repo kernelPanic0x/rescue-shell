@@ -1,14 +1,12 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
-    LocalConsole, LocalEvent, Osc52Extractor, PtyResponder, Role, SCROLLBACK_LINES,
-    StatusBarHandle, StdinProcessor, TerminalSizeNegotiator, window_change_signal,
+    LocalConsole, LocalEvent, Osc52Extractor, PtyResponder, Role, StatusBarHandle, StdinProcessor,
+    TerminalSizeNegotiator, window_change_signal,
 };
-use crate::protocol::{Encoder, HandshakePayload, TIMEOUT, TerminalSize, ToHelper, ToVictim};
+use crate::protocol::{Encoder, HandshakePayload, PtySize, ToHelper, ToVictim};
 use crate::{ServeArgs, app_config};
 use bytes::Bytes;
 use color_eyre::eyre::{Context, eyre};
-use crossterm::queue;
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, size};
 use futures_util::{SinkExt, StreamExt};
 use iroh::{
     Endpoint, SecretKey,
@@ -17,7 +15,7 @@ use iroh::{
 };
 use iroh::{PublicKey, RelayMode};
 use magic_wormhole::{Code, MailboxConnection, Wormhole};
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -37,7 +35,7 @@ impl HelperHub {
     pub async fn start(
         args: ServeArgs,
         statusbar_handle: StatusBarHandle,
-        vt_parser: Arc<Mutex<vt100::Parser>>,
+        console: Arc<LocalConsole>,
     ) -> color_eyre::Result<Self> {
         let (to_helpers, _) = broadcast::channel(1024);
         let (from_helpers_tx, from_helpers_rx) = mpsc::channel(1024);
@@ -49,7 +47,7 @@ impl HelperHub {
             to_helpers.clone(),
             from_helpers_tx,
             statusbar_handle.clone(),
-            vt_parser,
+            console,
             authenticated_peer.clone(),
         )?;
 
@@ -100,12 +98,12 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    pub fn spawn(cols: u16, rows: u16) -> color_eyre::Result<Self> {
+    pub fn spawn(size: crate::protocol::PtySize) -> color_eyre::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
+            .openpty(portable_pty::PtySize {
+                rows: size.rows,
+                cols: size.cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -168,10 +166,10 @@ impl PtySession {
         self.to_pty_tx.send(bytes).await.map_err(|e| eyre!(e))
     }
 
-    pub fn resize(&self, size: TerminalSize) -> color_eyre::Result<()> {
+    pub fn resize(&self, size: PtySize) -> color_eyre::Result<()> {
         self.master
-            .resize(PtySize {
-                rows: size.pty_rows,
+            .resize(portable_pty::PtySize {
+                rows: size.rows,
                 cols: size.cols,
                 pixel_width: 0,
                 pixel_height: 0,
@@ -203,42 +201,27 @@ pub struct Victim {
 
 impl Victim {
     pub async fn run(args: ServeArgs) -> color_eyre::Result<()> {
-        let (mut cols, mut rows) = size()?;
-        let mut pty_rows = rows.saturating_sub(1).max(1);
-        let mut size_negotiator = TerminalSizeNegotiator::new(TerminalSize { cols, pty_rows });
-        let vt_parser = Arc::new(Mutex::new(vt100::Parser::new(
-            pty_rows,
-            cols,
-            SCROLLBACK_LINES,
-        )));
         let statusbar_handle = StatusBarHandle::new(Role::Victim);
+        let console = Arc::new(LocalConsole::new(&statusbar_handle)?);
+        console.render().await?;
+        let mut size_negotiator = TerminalSizeNegotiator::new(console.get_pty_size());
         let mut statusbar_rx = statusbar_handle.subscribe();
 
-        let pty = PtySession::spawn(cols, pty_rows)?;
+        let pty_size: PtySize = console.get_pty_size();
+        let pty = PtySession::spawn(pty_size)?;
         let mut osc52_extractor = Osc52Extractor::default();
-        let hub =
-            HelperHub::start(args.clone(), statusbar_handle.clone(), vt_parser.clone()).await?;
 
         let mut sigwinch = window_change_signal();
-        let mut screen_size_resend =
-            tokio::time::interval(Duration::from_secs((TIMEOUT / 2).as_secs()));
 
-        let mut stdin_processor = StdinProcessor::new(pty_rows as i32);
-        let mut pty_responder = PtyResponder::new(vt_parser.clone());
-        let mut console = LocalConsole::new(vt_parser.clone(), &statusbar_handle)?;
+        let mut stdin_processor = StdinProcessor::new(pty_size.rows as i32);
+        let mut pty_responder = PtyResponder::new(Arc::clone(&console));
         let mut old_connected = 0;
+
+        let hub =
+            HelperHub::start(args.clone(), statusbar_handle.clone(), Arc::clone(&console)).await?;
 
         let res: color_eyre::Result<()> = 'main_loop: loop {
             tokio::select! {
-                // Peroidically resend term size
-                _ = screen_size_resend.tick() => {
-                    let size = size_negotiator.update_local(TerminalSize { cols, pty_rows });
-                    vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
-                    pty.resize(size)?;
-                    console.render().await?;
-                    hub.broadcast(ToHelper::SetSize(size));
-                }
-
                 // Statusbar update
                 _ = statusbar_rx.changed() => {
                     console.render().await?;
@@ -254,7 +237,7 @@ impl Victim {
                 // Shell output -> Mirror locally AND send to Helpers
                 Some(bytes) = pty.read_output() => {
                     // Model the screen FIRST so the CPR reply uses the post-chunk cursor.
-                    vt_parser.lock().unwrap().process(&bytes);
+                    console.access_parser_mut(|p| p.process(&bytes));
 
                     // Answer device queries (DA1/DA2/DSR/CPR/XTVERSION) back to the shell.
                     //
@@ -277,16 +260,16 @@ impl Victim {
                 // Victim local typing -> Send to PTY
                 Some(bytes) = console.read_stdin() => {
                     let (alt, mouse_on, scrolled, app_cursor) = {
-                        let p = vt_parser.lock().unwrap();
-                        (
+                        console.access_parser_mut(|p| (
                             p.screen().alternate_screen(),
-                            p.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None,
+                            p.screen().mouse_protocol_mode()!= vt100::MouseProtocolMode::None,
                             p.screen().scrollback() > 0,
-                            p.screen().application_cursor(), // check DECCKM state
-                        )
+                            p.screen().application_cursor(),
+                        ))
                     };
+                    let pty_size: PtySize = console.get_pty_size();
 
-                    stdin_processor.set_state(alt, mouse_on, pty_rows as i32, app_cursor);
+                    stdin_processor.set_state(alt, mouse_on, pty_size.rows as i32, app_cursor);
 
                     // Parse bytes safely (streaming tokenizer)
                     let (events, pty_bytes) = stdin_processor.process(&bytes);
@@ -296,8 +279,8 @@ impl Victim {
                         match event {
                             LocalEvent::Detach => break 'main_loop Ok(()),
                             LocalEvent::Scroll(delta) => {
-                                let offset = console.apply_scroll(delta);
-                                hub.broadcast(ToHelper::ScrollTo { offset: offset as u32 });
+                                let offset = console.apply_scroll(delta).await as u32;
+                                hub.broadcast(ToHelper::ScrollTo { offset });
                                 console.render().await?;
                             }
                         }
@@ -305,7 +288,7 @@ impl Victim {
 
                     // 2. Reset scrollback if user typed/forwarded regular keys while scrolled back
                     if !alt && scrolled && !pty_bytes.is_empty() {
-                        vt_parser.lock().unwrap().screen_mut().set_scrollback(0);
+                        console.access_parser_mut(|p| p.screen_mut().set_scrollback(0));
                         hub.broadcast(ToHelper::ScrollTo { offset: 0 });
                         console.render().await?;
                     }
@@ -322,22 +305,22 @@ impl Victim {
                             }
                         }
                         ToVictim::SizeHint { id, size } => {
-                            let size = size_negotiator.update_helper(id, size);
-                            vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
-                            pty.resize(size)?;
+                            let negotiated_size: PtySize = size_negotiator.update_helper(id, size);
+                            pty.resize(negotiated_size)?;
+                            console.resize_parser(negotiated_size);
+                            hub.broadcast(ToHelper::SetSize(negotiated_size));
                             console.render().await?;
-                            hub.broadcast(ToHelper::SetSize(size));
                         }
                         ToVictim::Bye{id} => {
                             size_negotiator.remove_helper(id);
-                            let size = size_negotiator.update_local(TerminalSize{cols, pty_rows});
-                            vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
+                            let size = size_negotiator.update_local(console.get_pty_size());
+                            hub.broadcast(ToHelper::SetSize(size));
+                            console.resize_parser(size);
                             pty.resize(size)?;
                             console.render().await?;
-                            hub.broadcast(ToHelper::SetSize(size));
                         },
                         ToVictim::RequestScrollTo { offset } => {
-                            vt_parser.lock().unwrap().screen_mut().set_scrollback(offset as usize);
+                            console.access_parser_mut(|p| p.screen_mut().set_scrollback(offset as usize));
 
                             // Rebroadcast so every helper (including the one that asked) converges.
                             hub.broadcast(ToHelper::ScrollTo { offset });
@@ -349,18 +332,11 @@ impl Victim {
 
                 // Window resized locally -> VT Parser
                 _ = sigwinch.recv() => {
-                    if let Ok((new_cols, new_rows)) = size() {
-                        cols = new_cols;
-                        rows = new_rows;
-                        pty_rows = rows.saturating_sub(1).max(1);
-
-                        let size = size_negotiator.update_local(TerminalSize { cols, pty_rows });
-                        vt_parser.lock().unwrap().screen_mut().set_size(size.pty_rows, size.cols);
-                        pty.resize(size)?;
-                        hub.broadcast(ToHelper::SetSize(size));
-
-                        console.render().await?;
-                    }
+                    let size = size_negotiator.update_local(console.get_pty_size());
+                    console.resize_parser(size);
+                    pty.resize(size)?;
+                    hub.broadcast(ToHelper::SetSize(size));
+                    console.render().await?;
                 }
 
                 // Child Shell exited
@@ -402,7 +378,7 @@ struct Protocol {
     from_helper: mpsc::Sender<ToVictim>,
     to_helpers: broadcast::Sender<ToHelper>,
     statusbar_handle: StatusBarHandle,
-    vt_parser: Arc<Mutex<vt100::Parser>>,
+    console: Arc<LocalConsole>,
     authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
 }
 
@@ -412,7 +388,7 @@ impl Protocol {
         to_helpers: broadcast::Sender<ToHelper>,
         from_helper: mpsc::Sender<ToVictim>,
         statusbar_handle: StatusBarHandle,
-        vt_parser: Arc<Mutex<vt100::Parser>>,
+        console: Arc<LocalConsole>,
         authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
     ) -> color_eyre::Result<Self> {
         Ok(Self {
@@ -421,7 +397,7 @@ impl Protocol {
             from_helper,
             to_helpers,
             statusbar_handle,
-            vt_parser,
+            console,
         })
     }
 }
@@ -471,20 +447,8 @@ impl ProtocolHandler for Protocol {
             tokio_util::codec::FramedWrite::new(encoder, codec_builder.new_codec());
         let mut raw_reader = tokio_util::codec::FramedRead::new(decoder, codec_builder.new_codec());
 
-        let mut initial_state = Vec::new();
-
-        // Check if term is in alternate screen mode and sync it with helper
-        let is_alternate_screen = self.vt_parser.lock().unwrap().screen().alternate_screen();
-        if is_alternate_screen {
-            let _ = queue!(initial_state, EnterAlternateScreen);
-        } else {
-            let _ = queue!(initial_state, LeaveAlternateScreen);
-        };
-
-        // Send complete screen to sync state
-        initial_state.extend_from_slice(&self.vt_parser.lock().unwrap().screen().state_formatted());
-
-        if let Ok(encoded) = ToHelper::Data(Bytes::from(initial_state)).encode() {
+        let initial_state = self.console.get_initial_screen_state();
+        if let Ok(encoded) = ToHelper::Data(initial_state).encode() {
             let _ = raw_writer.send(encoded).await;
         }
 

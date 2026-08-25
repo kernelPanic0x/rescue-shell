@@ -28,7 +28,7 @@ use tokio::{
 };
 use vte::{Params, Perform};
 
-use crate::protocol::{HelperId, TIMEOUT, TerminalSize};
+use crate::protocol::{HelperId, PtySize, TIMEOUT};
 
 pub const SCROLLBACK_LINES: usize = 1000;
 
@@ -305,29 +305,30 @@ impl StatusBarHandle {
     }
 }
 
-pub struct LocalConsole {
-    stdin_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
-    stdout_tx: Option<mpsc::Sender<Bytes>>,
-    stdout_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    is_utf8: bool,
-
+struct LocalConsoleInner {
     #[cfg(windows)]
     #[allow(unused)]
     win_vt_input: winvt::ConsoleHandle,
 
-    parser: Arc<Mutex<vt100::Parser>>,
+    parser: vt100::Parser,
     prev_screen: Vec<BytesMut>,
     buf: BytesMut,
     prev_physical_size: Option<(u16, u16)>,
     prev_virtual_size: Option<(u16, u16)>,
+}
+
+#[derive(Clone)]
+pub struct LocalConsole {
+    inner: Arc<Mutex<LocalConsoleInner>>,
+    stdout_tx: Arc<Mutex<Option<mpsc::Sender<Bytes>>>>,
+    stdin_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Bytes>>>,
+    stdout_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     statusbar_rx: watch::Receiver<StatusBarState>,
+    is_utf8: bool,
 }
 
 impl LocalConsole {
-    pub fn new(
-        current_parser: Arc<Mutex<vt100::Parser>>,
-        statusbar_handle: &StatusBarHandle,
-    ) -> color_eyre::Result<Self> {
+    pub fn new(statusbar_handle: &StatusBarHandle) -> color_eyre::Result<Self> {
         enable_raw_mode()?;
         execute!(std::io::stdout(), EnterAlternateScreen)?;
 
@@ -362,36 +363,53 @@ impl LocalConsole {
             }
         });
 
-        Ok(Self {
-            stdin_rx: tokio::sync::Mutex::new(stdin_rx),
-            stdout_tx: Some(stdout_tx),
-            stdout_handle: tokio::sync::Mutex::new(Some(stdout_handle)),
-            is_utf8: supports_unicode(),
+        let (cols, rows) = crossterm::terminal::size()?;
+        let pty_size: PtySize = PtySize {
+            cols,
+            rows: rows.saturating_sub(1).max(1),
+        };
+        let parser = vt100::Parser::new(pty_size.rows, pty_size.cols, SCROLLBACK_LINES);
 
-            #[cfg(windows)]
-            win_vt_input: winvt::ConsoleHandle::new()?.enable_virtual_terminal_input()?,
-
-            parser: current_parser,
+        let inner = Arc::new(Mutex::new(LocalConsoleInner {
+            parser,
             prev_screen: Vec::new(),
             buf: BytesMut::new(),
             prev_physical_size: None,
             prev_virtual_size: None,
+            #[cfg(windows)]
+            win_vt_input: winvt::ConsoleHandle::new()?.enable_virtual_terminal_input()?,
+        }));
+
+        Ok(Self {
+            stdout_tx: Arc::new(Mutex::new(Some(stdout_tx))),
+            stdin_rx: Arc::new(tokio::sync::Mutex::new(stdin_rx)),
+            stdout_handle: Arc::new(Mutex::new(Some(stdout_handle))),
             statusbar_rx: statusbar_handle.subscribe(),
+            is_utf8: supports_unicode(),
+            inner,
         })
     }
 
-    pub async fn render(&mut self) -> color_eyre::Result<()> {
+    pub async fn render(&self) -> color_eyre::Result<()> {
         let (phys_cols, phys_rows) = crossterm::terminal::size()?;
 
         let buf = {
-            let mut parser = self.parser.lock().unwrap();
-            let screen = parser.screen_mut();
+            let mut inner = self.inner.lock().unwrap();
+            let LocalConsoleInner {
+                parser,
+                prev_screen,
+                buf,
+                prev_physical_size,
+                prev_virtual_size,
+                ..
+            } = &mut *inner;
+            let screen = parser.screen();
             let (screen_rows, screen_cols) = screen.size();
 
             // Trigger full redraw if either virtual VT size OR physical terminal dimensions change
-            let size_changed = match (self.prev_virtual_size, self.prev_physical_size) {
+            let size_changed = match (prev_virtual_size, prev_physical_size) {
                 (Some(prev_virt), Some(prev_phys)) => {
-                    (screen_rows, screen_cols) != prev_virt || (phys_cols, phys_rows) != prev_phys
+                    (screen_rows, screen_cols) != *prev_virt || (phys_cols, phys_rows) != *prev_phys
                 }
                 _ => true,
             };
@@ -400,7 +418,7 @@ impl LocalConsole {
             let statusbar = self.statusbar_rx.borrow();
 
             // 1. Render status bar across the FULL PHYSICAL width on Row 0
-            statusbar.render_to(&mut self.buf, phys_cols);
+            statusbar.render_to(buf, phys_cols);
 
             let v_border = if self.is_utf8 { "│" } else { "|" };
             let h_border = if self.is_utf8 { '─' } else { '-' };
@@ -411,9 +429,9 @@ impl LocalConsole {
             let has_bottom_border = phys_rows > screen_rows + 1;
 
             // 2. Render screen contents (Full redraw vs. Diff)
-            if size_changed || self.prev_screen.is_empty() {
-                self.buf.extend_from_slice(&screen.input_mode_formatted());
-                self.buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
+            if size_changed || prev_screen.is_empty() {
+                buf.extend_from_slice(&screen.input_mode_formatted());
+                buf.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
 
                 let mut new_prev_screen = Vec::with_capacity(screen_rows as usize);
 
@@ -424,19 +442,19 @@ impl LocalConsole {
                     }
 
                     let _ = queue!(
-                        (&mut self.buf).writer(),
+                        buf.writer(),
                         MoveTo(0, physical_row),
                         ResetColor,
                         SetAttribute(Attribute::Reset),
                         Clear(ClearType::UntilNewLine)
                     );
 
-                    self.buf.extend_from_slice(&row_bytes);
+                    buf.extend_from_slice(&row_bytes);
 
                     // Draw vertical right border and clear margin with default background
                     if has_right_border {
                         let _ = queue!(
-                            (&mut self.buf).writer(),
+                            buf.writer(),
                             MoveTo(screen_cols, physical_row),
                             ResetColor,
                             SetForegroundColor(border_fg),
@@ -459,7 +477,7 @@ impl LocalConsole {
                         std::iter::repeat_n(h_border, screen_cols as usize).collect();
 
                     let _ = queue!(
-                        (&mut self.buf).writer(),
+                        buf.writer(),
                         MoveTo(0, border_row),
                         ResetColor,
                         SetForegroundColor(border_fg),
@@ -469,23 +487,19 @@ impl LocalConsole {
 
                     if has_right_border {
                         let _ = queue!(
-                            (&mut self.buf).writer(),
+                            buf.writer(),
                             Print(corner_border),
                             ResetColor,
                             Clear(ClearType::UntilNewLine)
                         );
                     } else {
-                        let _ = queue!(
-                            (&mut self.buf).writer(),
-                            ResetColor,
-                            Clear(ClearType::UntilNewLine)
-                        );
+                        let _ = queue!(buf.writer(), ResetColor, Clear(ClearType::UntilNewLine));
                     }
 
                     // Clear any remaining lines below the bottom border
                     for r in (border_row + 1)..phys_rows {
                         let _ = queue!(
-                            (&mut self.buf).writer(),
+                            buf.writer(),
                             MoveTo(0, r),
                             ResetColor,
                             SetAttribute(Attribute::Reset),
@@ -494,12 +508,11 @@ impl LocalConsole {
                     }
                 }
 
-                self.prev_screen = new_prev_screen;
+                let _ = std::mem::replace(prev_screen, new_prev_screen);
             } else {
                 // Ensure prev_screen has enough slot capacity if row count grew
-                if self.prev_screen.len() < screen_rows as usize {
-                    self.prev_screen
-                        .resize_with(screen_rows as usize, BytesMut::new);
+                if prev_screen.len() < screen_rows as usize {
+                    prev_screen.resize_with(screen_rows as usize, BytesMut::new);
                 }
 
                 for (r, row_bytes) in screen.rows_formatted(0, screen_cols).enumerate() {
@@ -509,25 +522,25 @@ impl LocalConsole {
                     }
 
                     // Compare against cached previous row
-                    if let Some(prev_row) = self.prev_screen.get(r)
+                    if let Some(prev_row) = prev_screen.get(r)
                         && prev_row.as_ref() == row_bytes.as_slice()
                     {
                         continue; // Unchanged row, skip rendering!
                     }
 
                     let _ = queue!(
-                        (&mut self.buf).writer(),
+                        buf.writer(),
                         MoveTo(0, physical_row),
                         ResetColor,
                         SetAttribute(Attribute::Reset),
                         Clear(ClearType::UntilNewLine)
                     );
 
-                    self.buf.extend_from_slice(&row_bytes);
+                    buf.extend_from_slice(&row_bytes);
 
                     if has_right_border {
                         let _ = queue!(
-                            (&mut self.buf).writer(),
+                            buf.writer(),
                             MoveTo(screen_cols, physical_row),
                             ResetColor,
                             SetForegroundColor(border_fg),
@@ -539,7 +552,7 @@ impl LocalConsole {
                     }
 
                     // Update cached row in-place (re-using existing BytesMut capacity)
-                    if let Some(prev_row) = self.prev_screen.get_mut(r) {
+                    if let Some(prev_row) = prev_screen.get_mut(r) {
                         prev_row.clear();
                         prev_row.extend_from_slice(&row_bytes);
                     }
@@ -552,7 +565,7 @@ impl LocalConsole {
                 let target_c = cur_c.min(screen_cols.saturating_sub(1));
                 let target_r = (cur_r + 1).min(phys_rows.saturating_sub(1));
                 let _ = queue!(
-                    (&mut self.buf).writer(),
+                    buf.writer(),
                     ResetColor,
                     SetAttribute(Attribute::Reset),
                     MoveTo(target_c, target_r)
@@ -560,15 +573,15 @@ impl LocalConsole {
             }
 
             if scrolled || screen.hide_cursor() {
-                let _ = queue!((&mut self.buf).writer(), Hide);
+                let _ = queue!(buf.writer(), Hide);
             } else {
-                let _ = queue!((&mut self.buf).writer(), Show);
+                let _ = queue!(buf.writer(), Show);
             }
 
-            self.prev_virtual_size = Some((screen_rows, screen_cols));
-            self.prev_physical_size = Some((phys_cols, phys_rows));
+            inner.prev_virtual_size = Some((screen_rows, screen_cols));
+            inner.prev_physical_size = Some((phys_cols, phys_rows));
 
-            self.buf.split().freeze()
+            inner.buf.split().freeze()
         };
 
         self.write_stdout(buf).await
@@ -579,32 +592,72 @@ impl LocalConsole {
     }
 
     pub async fn write_stdout(&self, bytes: Bytes) -> color_eyre::Result<()> {
-        self.stdout_tx
-            .as_ref()
-            .ok_or_else(|| eyre!("Console stdout closed"))?
-            .send(bytes)
-            .await
-            .map_err(|e| eyre!(e))
+        let tx = { self.stdout_tx.lock().unwrap().clone() }
+            .ok_or_else(|| eyre!("Console stdout closed"))?; // Lock released immediately!
+
+        tx.send(bytes).await.map_err(|e| eyre!(e))
     }
 
-    pub async fn flush_and_close(mut self) {
-        self.stdout_tx.take();
-        let handle = self.stdout_handle.lock().await.take();
+    pub async fn flush_and_close(&self) {
+        self.stdout_tx.lock().unwrap().take();
+        let handle = self.stdout_handle.lock().unwrap().take();
         if let Some(h) = handle {
-            let _ = h.await; // drain remaining frames to the local terminal
+            let _ = h.await;
         }
     }
 
     /// Adjust the vt100 viewport and return the new scrollback offset.
     /// Positive delta scrolls back (older), negative scrolls forward (toward live).
-    pub fn apply_scroll(&self, delta: i32) -> usize {
-        let mut parser = self.parser.lock().unwrap();
+    pub async fn apply_scroll(&self, delta: i32) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        let LocalConsoleInner { parser, .. } = &mut *inner;
         let current = parser.screen().scrollback() as i64;
         let next = (current + delta as i64).clamp(0, i64::MAX) as usize;
         // set_scrollback clamps the upper bound to the actual history length,
         // so we never need to know the max ourselves.
         parser.screen_mut().set_scrollback(next);
         parser.screen().scrollback()
+    }
+
+    pub fn get_initial_screen_state(&self) -> Bytes {
+        let mut inner = self.inner.lock().unwrap();
+        let LocalConsoleInner { parser, .. } = &mut *inner;
+        let mut initial_state = Vec::new();
+
+        let is_alternate_screen = parser.screen().alternate_screen();
+        if is_alternate_screen {
+            let _ = queue!(initial_state, EnterAlternateScreen);
+        } else {
+            let _ = queue!(initial_state, LeaveAlternateScreen);
+        }
+
+        initial_state.extend_from_slice(&parser.screen().state_formatted());
+
+        Bytes::from(initial_state)
+    }
+
+    /// Returns the maximum available PTY size for the current OS terminal window (rows - 1 for statusbar)
+    pub fn get_pty_size(&self) -> PtySize {
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        PtySize {
+            cols,
+            rows: rows.saturating_sub(1).max(1),
+        }
+    }
+
+    pub fn resize_parser(&self, size: PtySize) {
+        let mut inner = self.inner.lock().unwrap();
+        let LocalConsoleInner { parser, .. } = &mut *inner;
+        parser.screen_mut().set_size(size.rows, size.cols);
+    }
+
+    pub fn access_parser_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut vt100::Parser) -> R,
+    {
+        let mut inner = self.inner.lock().unwrap();
+        let LocalConsoleInner { parser, .. } = &mut *inner;
+        f(parser)
     }
 }
 
@@ -649,21 +702,21 @@ const DA1_RESP: &[u8] = b"\x1b[?62;1;9;15;22;29;52c";
 pub struct PtyResponder {
     parser: vte::Parser,
     buffer: BytesMut,
-    vt_parser: Arc<Mutex<vt100::Parser>>,
+    console: Arc<LocalConsole>,
 }
 
 impl PtyResponder {
-    pub fn new(vt_parser: Arc<Mutex<vt100::Parser>>) -> Self {
+    pub fn new(console: Arc<LocalConsole>) -> Self {
         Self {
             parser: vte::Parser::new(),
             buffer: BytesMut::new(),
-            vt_parser,
+            console,
         }
     }
 
     pub fn process(&mut self, chunk: &[u8]) -> Option<Bytes> {
         let mut handler = PtyResponderHandler {
-            vt_parser: &self.vt_parser,
+            console: &self.console,
             buffer: &mut self.buffer,
         };
         self.parser.advance(&mut handler, chunk);
@@ -672,7 +725,7 @@ impl PtyResponder {
 }
 
 struct PtyResponderHandler<'a> {
-    vt_parser: &'a Arc<Mutex<vt100::Parser>>,
+    console: &'a Arc<LocalConsole>,
     buffer: &'a mut BytesMut,
 }
 
@@ -693,7 +746,9 @@ impl Perform for PtyResponderHandler<'_> {
             }
 
             ('n', []) if first_param == 6 => {
-                let (row, col) = self.vt_parser.lock().unwrap().screen().cursor_position();
+                let (row, col) = self
+                    .console
+                    .access_parser_mut(|p| p.screen().cursor_position());
                 let cpr = format!("\x1b[{};{}R", row + 1, col + 1);
                 self.buffer.extend_from_slice(cpr.as_bytes());
             }
@@ -1114,17 +1169,17 @@ impl Perform for StdinPerformer {
 }
 
 struct HelperLifetime {
-    size: TerminalSize,
+    size: PtySize,
     deadline: Instant,
 }
 
 pub struct TerminalSizeNegotiator {
-    local_size: TerminalSize,
+    local_size: PtySize,
     helpers: HashMap<HelperId, HelperLifetime>,
 }
 
 impl TerminalSizeNegotiator {
-    pub fn new(local_size: TerminalSize) -> Self {
+    pub fn new(local_size: PtySize) -> Self {
         Self {
             local_size,
             helpers: HashMap::new(),
@@ -1132,13 +1187,13 @@ impl TerminalSizeNegotiator {
     }
 
     /// Update local window size
-    pub fn update_local(&mut self, size: TerminalSize) -> TerminalSize {
+    pub fn update_local(&mut self, size: PtySize) -> PtySize {
         self.local_size = size;
         self.best_size()
     }
 
     /// Update or insert a remote helper's size hint
-    pub fn update_helper(&mut self, id: HelperId, size: TerminalSize) -> TerminalSize {
+    pub fn update_helper(&mut self, id: HelperId, size: PtySize) -> PtySize {
         self.helpers.insert(
             id,
             HelperLifetime {
@@ -1150,13 +1205,13 @@ impl TerminalSizeNegotiator {
     }
 
     /// Remove a helper that disconnected
-    pub fn remove_helper(&mut self, id: HelperId) -> TerminalSize {
+    pub fn remove_helper(&mut self, id: HelperId) -> PtySize {
         self.helpers.remove(&id);
         self.best_size()
     }
 
     /// Calculate the minimum size across local terminal and all active helpers
-    pub fn best_size(&mut self) -> TerminalSize {
+    pub fn best_size(&mut self) -> PtySize {
         let now = Instant::now();
         self.helpers.retain(|_, h| now < h.deadline);
 

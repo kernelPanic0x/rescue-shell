@@ -1,4 +1,3 @@
-// src/main.rs
 mod common;
 mod console;
 mod helper;
