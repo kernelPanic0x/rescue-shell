@@ -720,7 +720,7 @@ impl Perform for PtyResponderHandler<'_> {
 #[derive(Default)]
 pub struct Osc52Extractor {
     parser: vte::Parser,
-    buffer: BytesMut,
+    buffer: Vec<u8>,
 }
 
 impl Osc52Extractor {
@@ -730,13 +730,13 @@ impl Osc52Extractor {
             buffer: &mut self.buffer,
         };
         self.parser.advance(&mut handler, chunk);
-        (!self.buffer.is_empty()).then_some(self.buffer.split().freeze())
+        (!self.buffer.is_empty()).then_some(Bytes::from(std::mem::take(&mut self.buffer)))
     }
 }
 
 /// Private helper that collects filtered OSC 52 sequences dispatched by `vte`
 struct Osc52Handler<'a> {
-    buffer: &'a mut BytesMut,
+    buffer: &'a mut Vec<u8>,
 }
 
 impl Perform for Osc52Handler<'_> {
