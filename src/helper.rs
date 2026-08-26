@@ -11,7 +11,8 @@ use color_eyre::eyre::{Context, eyre};
 use futures_util::{SinkExt, StreamExt};
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey, endpoint::presets};
 use magic_wormhole::{MailboxConnection, Wormhole};
-use std::{sync::Mutex, time::Duration};
+use parking_lot::Mutex;
+use std::time::Duration;
 use tokio::{io::BufReader, sync::mpsc, time::timeout};
 use tokio_util::codec::LengthDelimitedCodec;
 
@@ -293,7 +294,7 @@ impl Link {
     }
 
     pub async fn shutdown(&self) {
-        let handle = self.writer_handle.lock().unwrap().take();
+        let handle = self.writer_handle.lock().take();
 
         if let Some(handle) = handle {
             let _ = tokio::time::timeout(Duration::from_millis(500), handle).await;

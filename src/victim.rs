@@ -15,9 +15,10 @@ use iroh::{
 };
 use iroh::{PublicKey, RelayMode};
 use magic_wormhole::{Code, MailboxConnection, Wormhole};
+use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, MasterPty, native_pty_system};
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::sync::{broadcast, mpsc};
@@ -421,7 +422,6 @@ impl ProtocolHandler for Protocol {
             None => self
                 .authenticated_peer
                 .lock()
-                .unwrap()
                 .map(|expected| expected == remote_id)
                 .unwrap_or(false),
         };
@@ -587,10 +587,7 @@ impl Link {
                     let bytes = wormhole.receive().await?;
                     let helper_public_key = PublicKey::try_from(bytes.as_slice())?;
 
-                    authenticated_peer
-                        .lock()
-                        .unwrap()
-                        .replace(helper_public_key);
+                    authenticated_peer.lock().replace(helper_public_key);
 
                     if !args.multiple_helpers {
                         // Timeout after 60s if the helper never connects via QUIC
@@ -611,7 +608,7 @@ impl Link {
                             .subscribe()
                             .wait_for(|s| s.connected_helpers == 0)
                             .await;
-                        *authenticated_peer.lock().unwrap() = None;
+                        *authenticated_peer.lock() = None;
                     }
 
                     Ok(())
@@ -620,7 +617,7 @@ impl Link {
 
                 if res.is_err() {
                     statusbar_handle.set_code_state(WormholeCodeState::NoCode);
-                    *authenticated_peer.lock().unwrap() = None;
+                    *authenticated_peer.lock() = None;
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }

@@ -3653,6 +3653,7 @@ dependencies = [
  "libc",
  "magic-wormhole",
  "n0-error",
+ "parking_lot",
  "portable-pty",
  "serde",
  "serde_json",

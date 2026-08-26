@@ -5,6 +5,9 @@ edition = "2024"
 description = "A remote rescue shell that runs everywhere, all at once."
 authors = ["Elias Dalbeck <eliasdalbeck42@gmail.com>"]
 
+[lints.clippy]
+disallowed_types = "deny"
+
 [workspace]
 members = ["wormhole-cli"]
 
@@ -73,6 +76,7 @@ wincode = { version = "0.6.0", features = ["bytes", "derive"] }
 vte = "0.15.0"
 async-compression = { version = "0.4.43", features = ["lz4", "tokio"] }
 getrandom = "0.4.3"
+parking_lot = "0.12.5"
 
 [target.'cfg(unix)'.dependencies]
 signal-hook-tokio = "0.4"

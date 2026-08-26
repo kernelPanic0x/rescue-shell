@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     fmt,
     io::{Read, Write},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -22,6 +22,7 @@ use crossterm::{
     },
 };
 use magic_wormhole::Code;
+use parking_lot::Mutex;
 use tokio::{
     sync::{mpsc, watch},
     time::sleep,
@@ -419,7 +420,7 @@ impl LocalConsole {
         let (phys_cols, phys_rows) = crossterm::terminal::size()?;
 
         let buf = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             let LocalConsoleInner {
                 parser,
                 prev_screen,
@@ -617,15 +618,13 @@ impl LocalConsole {
     }
 
     pub async fn write_stdout(&self, bytes: Bytes) -> color_eyre::Result<()> {
-        let tx = { self.stdout_tx.lock().unwrap().clone() }
-            .ok_or_else(|| eyre!("Console stdout closed"))?; // Lock released immediately!
-
+        let tx = { self.stdout_tx.lock().clone() }.ok_or_else(|| eyre!("Console stdout closed"))?;
         tx.send(bytes).await.map_err(|e| eyre!(e))
     }
 
     pub async fn flush_and_close(&self) {
-        self.stdout_tx.lock().unwrap().take();
-        let handle = self.stdout_handle.lock().unwrap().take();
+        self.stdout_tx.lock().take();
+        let handle = self.stdout_handle.lock().take();
         if let Some(h) = handle {
             let _ = h.await;
         }
@@ -634,7 +633,7 @@ impl LocalConsole {
     /// Adjust the vt100 viewport and return the new scrollback offset.
     /// Positive delta scrolls back (older), negative scrolls forward (toward live).
     pub async fn apply_scroll(&self, delta: i32) -> usize {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let LocalConsoleInner { parser, .. } = &mut *inner;
         let current = parser.screen().scrollback() as i64;
         let next = (current + delta as i64).clamp(0, i64::MAX) as usize;
@@ -645,7 +644,7 @@ impl LocalConsole {
     }
 
     pub fn get_initial_screen_state(&self) -> Bytes {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let LocalConsoleInner { parser, .. } = &mut *inner;
         let mut initial_state = Vec::new();
 
@@ -671,7 +670,7 @@ impl LocalConsole {
     }
 
     pub fn resize_parser(&self, size: PtySize) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let LocalConsoleInner { parser, .. } = &mut *inner;
         parser.screen_mut().set_size(size.rows, size.cols);
     }
@@ -680,7 +679,7 @@ impl LocalConsole {
     where
         F: FnOnce(&mut vt100::Parser) -> R,
     {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let LocalConsoleInner { parser, .. } = &mut *inner;
         f(parser)
     }
