@@ -97,7 +97,7 @@ pub fn detect_color_support() -> ColorSupport {
 
 #[derive(Clone, Debug)]
 pub struct StatusBarState {
-    pub code: Option<Code>,
+    pub code: WormholeCodeState,
     pub role: Role,
     pub connected_helpers: u8,
     pub internet_state: InternetState,
@@ -110,7 +110,7 @@ pub struct StatusBarState {
 impl StatusBarState {
     fn new(role: Role) -> Self {
         Self {
-            code: None,
+            code: WormholeCodeState::NoCode,
             role,
             connected_helpers: 0,
             internet_state: InternetState::Offline,
@@ -170,8 +170,15 @@ impl StatusBarState {
 
         let mut segments: Vec<(Cow<'_, str>, Color, Attribute)> = vec![
             match &self.code {
-                Some(code) => (code.to_string().into(), code_fg, Attribute::Bold),
-                None => ("No code".into(), code_fg, Attribute::NormalIntensity),
+                WormholeCodeState::Code(code) => {
+                    (code.to_string().into(), code_fg, Attribute::Bold)
+                }
+                WormholeCodeState::NoCode => {
+                    ("No code".into(), code_fg, Attribute::NormalIntensity)
+                }
+                WormholeCodeState::Generating => {
+                    ("Generating...".into(), code_fg, Attribute::NormalIntensity)
+                }
             },
             (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
             (title, default_fg, Attribute::NormalIntensity),
@@ -238,6 +245,24 @@ impl StatusBarState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum WormholeCodeState {
+    Generating,
+    NoCode,
+    Code(Code),
+}
+
+impl std::fmt::Display for WormholeCodeState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            WormholeCodeState::Generating => Cow::Borrowed("Generating..."),
+            WormholeCodeState::NoCode => Cow::Borrowed("No code"),
+            WormholeCodeState::Code(code) => Cow::Owned(code.to_string()),
+        };
+        write!(f, "{s}")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct StatusBarHandle {
     tx: watch::Sender<StatusBarState>,
@@ -268,7 +293,7 @@ impl StatusBarHandle {
         Self { tx }
     }
 
-    pub fn set_code(&self, code: Option<Code>) {
+    pub fn set_code_state(&self, code: WormholeCodeState) {
         self.tx.send_modify(|s| s.code = code);
     }
 

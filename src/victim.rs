@@ -1,7 +1,7 @@
 use crate::common::{ALPN, ConnectionStateWatcher};
 use crate::console::{
     LocalConsole, LocalEvent, Osc52Extractor, PtyResponder, Role, StatusBarHandle, StdinProcessor,
-    TerminalSizeNegotiator, window_change_signal,
+    TerminalSizeNegotiator, WormholeCodeState, window_change_signal,
 };
 use crate::protocol::{Encoder, HandshakePayload, PtySize, ToHelper, ToVictim};
 use crate::{ServeArgs, app_config};
@@ -559,6 +559,7 @@ impl Link {
         tokio::task::spawn(async move {
             loop {
                 let res: color_eyre::Result<()> = async {
+                    statusbar_handle.set_code_state(WormholeCodeState::Generating);
                     let mailbox = match &args.common.code {
                         Some(code) => {
                             MailboxConnection::connect(
@@ -578,7 +579,7 @@ impl Link {
                     };
 
                     let code = mailbox.code();
-                    statusbar_handle.set_code(Some(code.clone()));
+                    statusbar_handle.set_code_state(WormholeCodeState::Code(code.clone()));
 
                     let mut wormhole = Wormhole::connect(mailbox).await?;
                     wormhole.send(encoded_handshake.clone()).await?;
@@ -604,7 +605,7 @@ impl Link {
                             eyre!("Helper connected via wormhole but timed out dialing QUIC")
                         })??;
 
-                        statusbar_handle.set_code(None);
+                        statusbar_handle.set_code_state(WormholeCodeState::NoCode);
 
                         let _ = statusbar_handle
                             .subscribe()
@@ -618,7 +619,7 @@ impl Link {
                 .await;
 
                 if res.is_err() {
-                    statusbar_handle.set_code(None);
+                    statusbar_handle.set_code_state(WormholeCodeState::NoCode);
                     *authenticated_peer.lock().unwrap() = None;
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
