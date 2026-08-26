@@ -112,8 +112,41 @@ impl PtySession {
 
         let shell = find_shell();
         let mut cmd = CommandBuilder::new(&shell);
+
+        // Universal settings across all Unix-like and modern terminals
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("NCURSES_NO_UTF8_ACS", "1");
         cmd.env("RESCUE_SHELL", std::env::current_exe()?);
+
+        // Platform-specific Locale handling
+        #[cfg(target_os = "macos")]
+        {
+            // macOS does not support C.UTF-8; en_US.UTF-8 is standard on all Macs
+            cmd.env("LANG", "en_US.UTF-8");
+            cmd.env("LC_ALL", "en_US.UTF-8");
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Linux has built-in C.UTF-8 in glibc and musl (no locale-gen required)
+            cmd.env("LANG", "C.UTF-8");
+            cmd.env("LC_ALL", "C.UTF-8");
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Windows primarily relies on code page 65001 (UTF-8), but setting UTF-8
+            // helps MSYS2/Git-Bash/Python CLI tools without breaking Windows CMD/PowerShell.
+            cmd.env("LANG", "en_US.UTF-8");
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            // Fallback for FreeBSD, OpenBSD, NetBSD, etc.
+            cmd.env("LANG", "C.UTF-8");
+        }
+
         let mut child = pair
             .slave
             .spawn_command(cmd)
