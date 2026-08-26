@@ -1,8 +1,6 @@
 > [!WARNING]
-> ### 🚧 Work in Progress 🚧
-> This project is currently **under active development**. 
-> Features may change, break, or be incomplete at any time.
-> **Use at your own risk!**
+> This project is currently **under active development**.
+> Features are currently stabilizing for the first release version, feel free to test it out!
 
 ![Banner](banner.png)
 
@@ -118,3 +116,11 @@ git clone https://github.com/kernelPanic0x/rescue-shell
 cd rescue-shell
 cargo build --release
 ```
+
+## 💖 Donations
+
+| Coin / Token | Network | Address |
+| :--- | :--- | :--- |
+| **USDT** | BNB Smart Chain (BEP-20) | `0x29B0DF13a5AB3A5417107F3B980d4331b6DAE5C9` |
+| **Bitcoin** | Bitcoin (BTC) | `bc1q3dztuw4qmmq6n5j2w5vuk8j60mmvzza3akanvs` |
+| **Monero** | Monero (XMR) | `46ywULibU4KZEyufQSdD9jeM1Uo9gXm1jUxfNsk9TRy28LtQCrefdj5J762ifTNrY45YuUPf5BS5uWfdsHkiwy4mLA37poB` |
