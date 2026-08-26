@@ -343,6 +343,24 @@ struct LocalConsoleInner {
     prev_virtual_size: Option<(u16, u16)>,
 }
 
+impl Drop for LocalConsoleInner {
+    fn drop(&mut self) {
+        let mut stdout = std::io::stdout();
+
+        let _ = execute!(
+            stdout,
+            SetAttribute(Attribute::Reset),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            Show
+        );
+
+        let _ = disable_raw_mode();
+
+        println!("[session ended]");
+    }
+}
+
 #[derive(Clone)]
 pub struct LocalConsole {
     inner: Arc<Mutex<LocalConsoleInner>>,
@@ -682,24 +700,6 @@ impl LocalConsole {
         let mut inner = self.inner.lock();
         let LocalConsoleInner { parser, .. } = &mut *inner;
         f(parser)
-    }
-}
-
-impl Drop for LocalConsole {
-    fn drop(&mut self) {
-        let mut stdout = std::io::stdout();
-
-        let _ = execute!(
-            stdout,
-            SetAttribute(Attribute::Reset),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            Show
-        );
-
-        let _ = disable_raw_mode();
-
-        println!("[session ended]");
     }
 }
 
