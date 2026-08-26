@@ -35,7 +35,7 @@ impl HelperHub {
     pub async fn start(
         args: ServeArgs,
         statusbar_handle: StatusBarHandle,
-        console: Arc<LocalConsole>,
+        console: LocalConsole,
     ) -> color_eyre::Result<Self> {
         let (to_helpers, _) = broadcast::channel(1024);
         let (from_helpers_tx, from_helpers_rx) = mpsc::channel(1024);
@@ -202,7 +202,7 @@ pub struct Victim {
 impl Victim {
     pub async fn run(args: ServeArgs) -> color_eyre::Result<()> {
         let statusbar_handle = StatusBarHandle::new(Role::Victim);
-        let console = Arc::new(LocalConsole::new(&statusbar_handle)?);
+        let console = LocalConsole::new(&statusbar_handle)?;
         console.render().await?;
         let mut size_negotiator = TerminalSizeNegotiator::new(console.get_pty_size());
         let mut statusbar_rx = statusbar_handle.subscribe();
@@ -214,11 +214,10 @@ impl Victim {
         let mut sigwinch = window_change_signal();
 
         let mut stdin_processor = StdinProcessor::new(pty_size.rows as i32);
-        let mut pty_responder = PtyResponder::new(Arc::clone(&console));
+        let mut pty_responder = PtyResponder::new(console.clone());
         let mut old_connected = 0;
 
-        let hub =
-            HelperHub::start(args.clone(), statusbar_handle.clone(), Arc::clone(&console)).await?;
+        let hub = HelperHub::start(args.clone(), statusbar_handle.clone(), console.clone()).await?;
 
         let res: color_eyre::Result<()> = 'main_loop: loop {
             tokio::select! {
@@ -378,7 +377,7 @@ struct Protocol {
     from_helper: mpsc::Sender<ToVictim>,
     to_helpers: broadcast::Sender<ToHelper>,
     statusbar_handle: StatusBarHandle,
-    console: Arc<LocalConsole>,
+    console: LocalConsole,
     authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
 }
 
@@ -388,7 +387,7 @@ impl Protocol {
         to_helpers: broadcast::Sender<ToHelper>,
         from_helper: mpsc::Sender<ToVictim>,
         statusbar_handle: StatusBarHandle,
-        console: Arc<LocalConsole>,
+        console: LocalConsole,
         authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
     ) -> color_eyre::Result<Self> {
         Ok(Self {

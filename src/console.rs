@@ -702,11 +702,11 @@ const DA1_RESP: &[u8] = b"\x1b[?62;1;9;15;22;29;52c";
 pub struct PtyResponder {
     parser: vte::Parser,
     buffer: BytesMut,
-    console: Arc<LocalConsole>,
+    console: LocalConsole,
 }
 
 impl PtyResponder {
-    pub fn new(console: Arc<LocalConsole>) -> Self {
+    pub fn new(console: LocalConsole) -> Self {
         Self {
             parser: vte::Parser::new(),
             buffer: BytesMut::new(),
@@ -725,7 +725,7 @@ impl PtyResponder {
 }
 
 struct PtyResponderHandler<'a> {
-    console: &'a Arc<LocalConsole>,
+    console: &'a LocalConsole,
     buffer: &'a mut BytesMut,
 }
 
