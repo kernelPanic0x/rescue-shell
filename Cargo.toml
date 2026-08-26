@@ -69,7 +69,6 @@ strum_macros = "0.28.0"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures-util = { workspace = true }
-tokio-serde = { version = "0.9.0", features = ["bincode"] }
 url = { workspace = true }
 vt100 = "0.16.2"
 wincode = { version = "0.6.0", features = ["bytes", "derive"] }
@@ -79,7 +78,6 @@ getrandom = "0.4.3"
 parking_lot = "0.12.5"
 
 [target.'cfg(unix)'.dependencies]
-signal-hook-tokio = "0.4"
 signal-hook = "0.3"
 
 [target.'cfg(windows)'.dependencies]
