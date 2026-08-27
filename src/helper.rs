@@ -66,12 +66,12 @@ impl Helper {
     pub async fn run(args: ConnectArgs) -> color_eyre::Result<()> {
         let id = getrandom::u64()?.into();
         let statusbar_handle = StatusBarHandle::new(Role::Helper);
+        let hub = VictimHub::connect(args, statusbar_handle.clone()).await?;
         let console = LocalConsole::new(&statusbar_handle)?;
         console.render().await?;
         let mut statusbar_rx = statusbar_handle.subscribe();
 
         let mut osc52_extractor = Osc52Extractor::default();
-        let hub = VictimHub::connect(args, statusbar_handle.clone()).await?;
 
         // Send initial terminal dimensions to victim shell
         hub.send(ToVictim::SizeHint {
