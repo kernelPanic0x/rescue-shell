@@ -31,7 +31,11 @@ impl VictimHub {
         let (to_victim_tx, to_victim_rx) = mpsc::channel::<ToVictim>(1024);
         let (from_victim_tx, from_victim_rx) = mpsc::channel::<ToHelper>(1024);
 
-        let link = Link::connect(args, statusbar_handle, to_victim_rx, from_victim_tx).await?;
+        let link = timeout(
+            Duration::from_secs(10),
+            Link::connect(args, statusbar_handle, to_victim_rx, from_victim_tx),
+        )
+        .await??;
 
         Ok(Self {
             to_victim_tx,
