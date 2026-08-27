@@ -16,9 +16,8 @@
 
 <div align="center">
 
-[![License: EUPL 1.2](https://img.shields.io/badge/License-EUPL_1.2-blue.svg)](https://opensource.org/licenses/EUPL-1.2)
-[![Ko-fi](https://shields.io/badge/ko--fi-Buy_me_a_coffee-ff5f5f?logo=ko-fi&style=for-the-badgeKo-fi)](https://ko-fi.com/kernelpanic0x)
-
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Buy_me_a_coffee-ff5f5f?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/kernelpanic0x)
+[![Donate](https://img.shields.io/badge/Donate_Crypto-F7931A?style=flat&logo=bitcoin&logoColor=white)](#-donations)
 
 </div>
 
@@ -119,10 +118,34 @@ cargo build --release
 
 ## 💖 Donations
 
+<details>
+<summary>USDT (BNB Smart Chain / BEP-20)</summary>
 <div align="center">
 
-**Monero (XMR)**: `46ywULibU4KZEyufQSdD9jeM1Uo9gXm1jUxfNsk9TRy28LtQCrefdj5J762ifTNrY45YuUPf5BS5uWfdsHkiwy4mLA37poB` \
-**USDT (BEP20)**: `0x29B0DF13a5AB3A5417107F3B980d4331b6DAE5C9` \
+<img src="https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=0x29B0DF13a5AB3A5417107F3B980d4331b6DAE5C9" width="256" alt="Monero (XMR) Address" />
+
+**USDT (BNB Smart Chain / BEP-20)**: `0x29B0DF13a5AB3A5417107F3B980d4331b6DAE5C9`
+
+</div>
+</details>
+
+<details>
+<summary>Bitcoin (BTC)</summary>
+<div align="center">
+<img src="https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=bitcoin:bc1q3dztuw4qmmq6n5j2w5vuk8j60mmvzza3akanvs" width="256" alt="Monero (XMR) Address" />
+
 **Bitcoin (BTC)**: `bc1q3dztuw4qmmq6n5j2w5vuk8j60mmvzza3akanvs`
 
 </div>
+</details>
+
+<details>
+<summary>Monero (XMR)</summary>
+<div align="center">
+
+<img src="https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=monero:46ywULibU4KZEyufQSdD9jeM1Uo9gXm1jUxfNsk9TRy28LtQCrefdj5J762ifTNrY45YuUPf5BS5uWfdsHkiwy4mLA37poB" width="256" alt="Monero (XMR) Address" />
+
+**Monero (XMR)**: `46ywULibU4KZEyufQSdD9jeM1Uo9gXm1jUxfNsk9TRy28LtQCrefdj5J762ifTNrY45YuUPf5BS5uWfdsHkiwy4mLA37poB`
+
+</div>
+</details>
