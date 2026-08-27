@@ -1,6 +1,6 @@
 > [!WARNING]
-> This project is currently **under active development**.
-> Features are currently stabilizing for the first release version, feel free to test it out!
+> This project is **under active development**.
+> Features are currently stabilizing for the first release. Feel free to test it out!
 
 ![Banner](banner.png)
 
