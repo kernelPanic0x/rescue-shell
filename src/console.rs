@@ -145,16 +145,13 @@ impl StatusBarState {
 
         let (net_str, net_fg) = match self.internet_state {
             InternetState::Online(ping) => {
-                let symbol = if self.is_utf8 { "●" } else { "[*]" };
+                let symbol = if self.is_utf8 { "●" } else { "*" };
                 (
-                    format!("{symbol} Online ({} ms)", ping.as_millis()),
+                    Cow::Owned(format!("{symbol} Online ({} ms)", ping.as_millis())),
                     Color::Green,
                 )
             }
-            InternetState::Offline => {
-                let symbol = if self.is_utf8 { "×" } else { "[!]" };
-                (format!("{symbol} Offline"), Color::Red)
-            }
+            InternetState::Offline => (Cow::Borrowed("x Offline"), Color::Red),
         };
 
         let (helper_str, helper_fg) = if self.connected_helpers > 0 {
@@ -188,7 +185,7 @@ impl StatusBarState {
             (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
             (helper_str, helper_fg, Attribute::NormalIntensity),
             (" ║ ".into(), separator_fg, Attribute::NormalIntensity),
-            (net_str.into(), net_fg, Attribute::NormalIntensity),
+            (net_str, net_fg, Attribute::NormalIntensity),
             (
                 " ║ CTRL+] to exit".into(),
                 default_fg,
