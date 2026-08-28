@@ -898,7 +898,7 @@ mod winvt {
             let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
             let mut original_mode: CONSOLE_MODE = 0;
 
-            if unsafe { GetConsoleMode(handle, &mut original_mode) } == 0 {
+            if unsafe { GetConsoleMode(handle, &raw mut original_mode) } == 0 {
                 return Err(std::io::Error::last_os_error());
             }
 
@@ -911,7 +911,7 @@ mod winvt {
         pub fn enable_virtual_terminal_input(self) -> std::io::Result<Self> {
             let mut mode: CONSOLE_MODE = 0;
 
-            if unsafe { GetConsoleMode(self.handle, &mut mode) } == 0 {
+            if unsafe { GetConsoleMode(self.handle, &raw mut mode) } == 0 {
                 return Err(std::io::Error::last_os_error());
             }
 
@@ -963,7 +963,7 @@ pub fn window_change_signal() -> mpsc::Receiver<()> {
                 last = now;
 
                 // Coalesce events: send if empty, drop if full, break if closed
-                if matches!(tx.try_send(()), Err(mpsc::error::TrySendError::Closed(_))) {
+                if matches!(tx.try_send(()), Err(mpsc::error::TrySendError::Closed(()))) {
                     break;
                 }
             }
