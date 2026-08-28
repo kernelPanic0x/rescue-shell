@@ -105,7 +105,7 @@ pub struct StatusBarState {
     pub tick: usize,
     is_utf8: bool,
     color_mode: ColorSupport,
-    title: String,
+    title: &'static str,
 }
 
 impl StatusBarState {
@@ -118,7 +118,7 @@ impl StatusBarState {
             tick: 0,
             is_utf8: supports_unicode(),
             color_mode: detect_color_support(),
-            title: format!("{} {}", env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION")),
+            title: concat!(env!("CARGO_BIN_NAME"), " ", env!("CARGO_PKG_VERSION")),
         }
     }
 
@@ -164,7 +164,7 @@ impl StatusBarState {
         };
 
         let role = Cow::from(<&'static str>::from(&self.role));
-        let title = Cow::from(&self.title);
+        let title = Cow::Borrowed(self.title);
 
         let mut segments: Vec<(Cow<'_, str>, Color, Attribute)> = vec![
             match &self.code {
