@@ -61,14 +61,40 @@ pub enum Role {
 
 /// Check if the terminal environment supports UTF-8 glyphs
 fn supports_unicode() -> bool {
-    // Windows Terminal / modern shells or UTF-8 locale on Linux/macOS
-    if let Ok(lang) = std::env::var("LANG")
-        && (lang.contains("UTF-8") || lang.contains("utf8") || lang.contains("UTF8"))
+    // 1. If it's a Linux virtual console (TTY), assume no rich Unicode/border support
+    if std::env::var("TERM").is_ok_and(|term| term.to_lowercase().starts_with("linux")) {
+        return false;
+    }
+
+    // 2. Modern terminal emulators / multiplexers (almost universally support UTF-8)
+    if std::env::var("WT_SESSION").is_ok()          // Windows Terminal
+        || std::env::var("TERM_PROGRAM").is_ok()    // iTerm2, Apple Terminal, VS Code, WezTerm, Ghostty, Alacritty
+        || std::env::var("KONSOLE_VERSION").is_ok() // KDE Konsole
+        || std::env::var("TMUX").is_ok()
     {
         return true;
     }
-    // Check for modern terminal emulators
-    std::env::var("TERM_PROGRAM").is_ok() || std::env::var("WT_SESSION").is_ok()
+
+    // 3. Check POSIX locale hierarchy (LC_ALL > LC_CTYPE > LANG)
+    let locale = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_CTYPE"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default()
+        .to_lowercase();
+
+    if locale.contains("utf-8") || locale.contains("utf8") {
+        return true;
+    }
+
+    // 4. Fallback on modern Windows 10+ (cmd.exe / powershell usually support UTF-8)
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
