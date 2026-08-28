@@ -15,7 +15,7 @@ pub fn copy_to_osc52() -> color_eyre::Result<()> {
 
     // \x1b]52;c; -> Start OSC 52 sequence ('c' specifies system clipboard)
     // \x07       -> BEL character to terminate sequence (or \x1b\ for ST)
-    let osc52 = format!("\x1b]52;c;{}\x07", encoded);
+    let osc52 = format!("\x1b]52;c;{encoded}\x07");
 
     let mut stdout = stdout().lock();
     stdout.write_all(osc52.as_bytes())?;
@@ -38,7 +38,7 @@ pub fn gen_public_key() -> color_eyre::Result<()> {
 
     let public_key = secret_key.public();
 
-    println!("{}", public_key);
+    println!("{public_key}");
 
     Ok(())
 }
@@ -46,7 +46,7 @@ pub fn gen_public_key() -> color_eyre::Result<()> {
 pub fn gen_secret_key() {
     let secret_key = SecretKey::generate();
     let hex = hex::encode(secret_key.to_bytes());
-    println!("{}", hex);
+    println!("{hex}");
 }
 
 pub fn read_public_keys_file(path: &PathBuf) -> color_eyre::Result<Vec<PublicKey>> {

@@ -1,4 +1,4 @@
-use crate::common::{ALPN, ConnectionStateWatcher};
+use crate::common::{ALPN, CODEC_BUFFER_SIZE, ConnectionStateWatcher, QUEUE_SIZE};
 use crate::console::{
     LocalConsole, LocalEvent, Osc52Extractor, PtyResponder, Role, StatusBarHandle, StdinProcessor,
     TerminalSizeNegotiator, WormholeCodeState, window_change_signal,
@@ -38,8 +38,8 @@ impl HelperHub {
         statusbar_handle: StatusBarHandle,
         console: LocalConsole,
     ) -> color_eyre::Result<Self> {
-        let (to_helpers, _) = broadcast::channel(1024);
-        let (from_helpers_tx, from_helpers_rx) = mpsc::channel(1024);
+        let (to_helpers, _) = broadcast::channel(QUEUE_SIZE);
+        let (from_helpers_tx, from_helpers_rx) = mpsc::channel(QUEUE_SIZE);
 
         let authenticated_peer = Arc::new(Mutex::new(None));
 
@@ -49,8 +49,8 @@ impl HelperHub {
             from_helpers_tx,
             statusbar_handle.clone(),
             console,
-            authenticated_peer.clone(),
-        )?;
+            Arc::clone(&authenticated_peer),
+        );
 
         let link = Link::new(args, protocol, statusbar_handle.clone(), authenticated_peer)
             .await
@@ -165,7 +165,9 @@ impl PtySession {
                 match pty_reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if pty_out_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        #[expect(clippy::indexing_slicing)]
+                        let payload = buf[..n].to_vec();
+                        if pty_out_tx.blocking_send(payload).is_err() {
                             break;
                         }
                     }
@@ -215,8 +217,8 @@ impl PtySession {
     pub async fn wait_exit(&self) -> color_eyre::Result<()> {
         let mut handle = self.child_exit.lock().await;
 
-        if let Some(handle) = handle.as_mut() {
-            match handle.await {
+        if let Some(h) = handle.as_mut() {
+            match h.await {
                 Ok(Ok(_)) => Ok(()),
                 Ok(Err(e)) => Err(eyre!("wait failed: {e}")),
                 Err(e) => Err(eyre!("join failed: {e}")),
@@ -238,16 +240,16 @@ impl Victim {
         let statusbar_handle = StatusBarHandle::new(Role::Victim);
         let console = LocalConsole::new(&statusbar_handle)?;
         console.render().await?;
-        let mut size_negotiator = TerminalSizeNegotiator::new(console.get_pty_size());
+        let mut size_negotiator = TerminalSizeNegotiator::new(LocalConsole::get_pty_size());
         let mut statusbar_rx = statusbar_handle.subscribe();
 
-        let pty_size: PtySize = console.get_pty_size();
+        let pty_size: PtySize = LocalConsole::get_pty_size();
         let pty = PtySession::spawn(pty_size)?;
         let mut osc52_extractor = Osc52Extractor::default();
 
         let mut sigwinch = window_change_signal();
 
-        let mut stdin_processor = StdinProcessor::new(pty_size.rows as i32);
+        let mut stdin_processor = StdinProcessor::new(pty_size.rows.into());
         let mut pty_responder = PtyResponder::new(console.clone());
         let mut old_connected = 0;
 
@@ -300,9 +302,9 @@ impl Victim {
                             p.screen().application_cursor(),
                         ))
                     };
-                    let pty_size: PtySize = console.get_pty_size();
+                    let pty_size: PtySize = LocalConsole::get_pty_size();
 
-                    stdin_processor.set_state(alt, mouse_on, pty_size.rows as i32, app_cursor);
+                    stdin_processor.set_state(alt, mouse_on, pty_size.rows.into(), app_cursor);
 
                     // Parse bytes safely (streaming tokenizer)
                     let (events, pty_bytes) = stdin_processor.process(&bytes);
@@ -312,7 +314,7 @@ impl Victim {
                         match event {
                             LocalEvent::Detach => break 'main_loop Ok(()),
                             LocalEvent::Scroll(delta) => {
-                                let offset = console.apply_scroll(delta).await as u32;
+                                let offset = console.apply_scroll(delta.try_into()?).try_into()?;
                                 hub.broadcast(ToHelper::ScrollTo { offset });
                                 console.render().await?;
                             }
@@ -346,7 +348,7 @@ impl Victim {
                         }
                         ToVictim::Bye{id} => {
                             size_negotiator.remove_helper(id);
-                            let size = size_negotiator.update_local(console.get_pty_size());
+                            let size = size_negotiator.update_local(LocalConsole::get_pty_size());
                             hub.broadcast(ToHelper::SetSize(size));
                             console.resize_parser(size);
                             pty.resize(size)?;
@@ -365,7 +367,7 @@ impl Victim {
 
                 // Window resized locally -> VT Parser
                 _ = sigwinch.recv() => {
-                    let size = size_negotiator.update_local(console.get_pty_size());
+                    let size = size_negotiator.update_local(LocalConsole::get_pty_size());
                     console.resize_parser(size);
                     pty.resize(size)?;
                     hub.broadcast(ToHelper::SetSize(size));
@@ -423,24 +425,27 @@ impl Protocol {
         statusbar_handle: StatusBarHandle,
         console: LocalConsole,
         authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
-    ) -> color_eyre::Result<Self> {
-        Ok(Self {
-            authenticated_peer,
+    ) -> Self {
+        Self {
             allowed_peers,
             from_helper,
             to_helpers,
             statusbar_handle,
             console,
-        })
+            authenticated_peer,
+        }
     }
 }
 
 impl std::fmt::Debug for Protocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Protocol")
+            .field("allowed_peers", &self.allowed_peers)
             .field("from_helper", &self.from_helper)
             .field("to_helpers", &self.to_helpers)
             .field("statusbar_handle", &self.statusbar_handle)
+            .field("console", &"<LocalConsole>")
+            .field("authenticated_peers", &self.authenticated_peer)
             .field("vt_parser", &"<vt100::Parser>")
             .finish()
     }
@@ -474,7 +479,7 @@ impl ProtocolHandler for Protocol {
         let encoder = async_compression::tokio::write::Lz4Encoder::new(tx);
         let decoder = async_compression::tokio::bufread::Lz4Decoder::new(BufReader::new(rx));
         let mut codec_builder = LengthDelimitedCodec::builder();
-        codec_builder.max_frame_length(8 * 1024 * 1024);
+        codec_builder.max_frame_length(CODEC_BUFFER_SIZE);
         let mut raw_writer =
             tokio_util::codec::FramedWrite::new(encoder, codec_builder.new_codec());
         let mut raw_reader = tokio_util::codec::FramedRead::new(decoder, codec_builder.new_codec());
@@ -482,6 +487,7 @@ impl ProtocolHandler for Protocol {
         let initial_state = self.console.get_initial_screen_state();
         if let Ok(encoded) = ToHelper::Data(initial_state).encode() {
             let _ = raw_writer.send(encoded).await;
+            let _ = raw_writer.flush().await;
         }
 
         let helper_victim = tokio::spawn(async move {
@@ -500,6 +506,7 @@ impl ProtocolHandler for Protocol {
                 match to_helpers.recv().await {
                     Ok(msg) => {
                         raw_writer.send(msg.encode()?).await?;
+                        raw_writer.flush().await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         return Err(eyre!("Helper lagged behind by {n} frames"));
@@ -577,7 +584,7 @@ impl Link {
         let my_addr = endpoint.addr();
         let payload = HandshakePayload {
             public_key: *my_addr.id.as_bytes(),
-            relay_url: my_addr.relay_urls().next().map(|u| u.to_string()),
+            relay_url: my_addr.relay_urls().next().map(ToString::to_string),
             direct_addresses: my_addr.ip_addrs().copied().collect(),
         };
         let encoded_handshake = wincode::serialize(&payload)?;
@@ -683,7 +690,6 @@ fn find_shell() -> String {
         ["/bin/sh", "/bin/bash", "/bin/ash", "/bin/dash"]
             .iter()
             .find(|p| std::path::Path::new(p).exists())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "sh".into())
+            .map_or_else(|| "sh".into(), ToString::to_string)
     }
 }

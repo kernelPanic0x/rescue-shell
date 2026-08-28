@@ -29,7 +29,10 @@ use tokio::{
 };
 use vte::{Params, Perform};
 
-use crate::protocol::{HelperId, PtySize, TIMEOUT};
+use crate::{
+    common::QUEUE_SIZE,
+    protocol::{HelperId, PtySize, TIMEOUT},
+};
 
 pub const SCROLLBACK_LINES: usize = 1000;
 
@@ -227,16 +230,16 @@ impl StatusBarState {
         let _ = queue!(buf.writer(), MoveTo(0, 0), SetBackgroundColor(bar_bg));
 
         for chunk in visible_window.chunk_by(|a, b| a.1 == b.1 && a.2 == b.2) {
-            let fg = chunk[0].1;
-            let attr = chunk[0].2;
-            let text: String = chunk.iter().map(|(c, _, _)| c).collect();
+            let Some(&(_, fg, attr)) = chunk.first() else {
+                continue;
+            };
 
-            let _ = queue!(
-                buf.writer(),
-                SetForegroundColor(fg),
-                SetAttribute(attr),
-                Print(text)
-            );
+            let _ = queue!(buf.writer(), SetForegroundColor(fg), SetAttribute(attr),);
+
+            let mut writer = buf.writer();
+            for &(c, _, _) in chunk {
+                let _ = write!(writer, "{c}");
+            }
         }
 
         let _ = queue!(buf.writer(), ResetColor, SetAttribute(Attribute::Reset));
@@ -370,46 +373,15 @@ pub struct LocalConsole {
 
 impl LocalConsole {
     pub fn new(statusbar_handle: &StatusBarHandle) -> color_eyre::Result<Self> {
-        enable_raw_mode()?;
-        execute!(std::io::stdout(), EnterAlternateScreen)?;
-
-        // Keyboard reader: blocking std::io::stdin() on a plain OS thread,
-        // pushed into the channel that the async loop consumes.
-        let (stdin_tx, stdin_rx) = mpsc::channel::<Bytes>(64);
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 1024];
-            loop {
-                match std::io::stdin().read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if stdin_tx
-                            .blocking_send(Bytes::copy_from_slice(&buf[..n]))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        // Local-screen writer: single std::io::stdout() task, ordered by mpsc.
-        let (stdout_tx, mut stdout_rx) = mpsc::channel::<Bytes>(64);
-        let stdout_handle = tokio::task::spawn_blocking(move || {
-            let mut stdout = std::io::stdout();
-            while let Some(b) = stdout_rx.blocking_recv() {
-                if stdout.write_all(&b).is_err() || stdout.flush().is_err() {
-                    break;
-                }
-            }
-        });
-
         let (cols, rows) = crossterm::terminal::size()?;
         let pty_size: PtySize = PtySize {
             cols,
             rows: rows.saturating_sub(1).max(1),
         };
         let parser = vt100::Parser::new(pty_size.rows, pty_size.cols, SCROLLBACK_LINES);
+
+        let (stdin_tx, stdin_rx) = mpsc::channel::<Bytes>(QUEUE_SIZE);
+        let (stdout_tx, mut stdout_rx) = mpsc::channel::<Bytes>(QUEUE_SIZE);
 
         let inner = Arc::new(Mutex::new(LocalConsoleInner {
             parser,
@@ -420,6 +392,38 @@ impl LocalConsole {
             #[cfg(windows)]
             win_vt_input: winvt::ConsoleHandle::new()?.enable_virtual_terminal_input()?,
         }));
+
+        // SECURITY: Only enter into raw mode after inner allocation so that on failure the drop fn restores it again.
+        enable_raw_mode()?;
+        execute!(std::io::stdout(), EnterAlternateScreen)?;
+
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            loop {
+                match std::io::stdin().read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        #[expect(clippy::indexing_slicing)]
+                        let slice = &buf[..n];
+                        if stdin_tx
+                            .blocking_send(Bytes::copy_from_slice(slice))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let stdout_handle = tokio::task::spawn_blocking(move || {
+            let mut stdout = std::io::stdout();
+            while let Some(b) = stdout_rx.blocking_recv() {
+                if stdout.write_all(&b).is_err() || stdout.flush().is_err() {
+                    break;
+                }
+            }
+        });
 
         Ok(Self {
             stdout_tx: Arc::new(Mutex::new(Some(stdout_tx))),
@@ -476,12 +480,9 @@ impl LocalConsole {
 
                 let mut new_prev_screen = Vec::with_capacity(screen_rows as usize);
 
-                for (r, row_bytes) in screen.rows_formatted(0, screen_cols).enumerate() {
-                    let physical_row = (r as u16) + 1;
-                    if physical_row >= phys_rows {
-                        break;
-                    }
-
+                for (physical_row, (_, row_bytes)) in
+                    (1..phys_rows).zip(screen.rows_formatted(0, screen_cols).enumerate())
+                {
                     let _ = queue!(
                         buf.writer(),
                         MoveTo(0, physical_row),
@@ -556,12 +557,9 @@ impl LocalConsole {
                     prev_screen.resize_with(screen_rows as usize, BytesMut::new);
                 }
 
-                for (r, row_bytes) in screen.rows_formatted(0, screen_cols).enumerate() {
-                    let physical_row = (r as u16) + 1;
-                    if physical_row >= phys_rows {
-                        break;
-                    }
-
+                for (physical_row, (r, row_bytes)) in
+                    (1u16..).zip(screen.rows_formatted(0, screen_cols).enumerate())
+                {
                     // Compare against cached previous row
                     if let Some(prev_row) = prev_screen.get(r)
                         && prev_row.as_ref() == row_bytes.as_slice()
@@ -647,15 +645,15 @@ impl LocalConsole {
 
     /// Adjust the vt100 viewport and return the new scrollback offset.
     /// Positive delta scrolls back (older), negative scrolls forward (toward live).
-    pub async fn apply_scroll(&self, delta: i32) -> usize {
+    pub fn apply_scroll(&self, delta: isize) -> usize {
         let mut inner = self.inner.lock();
-        let LocalConsoleInner { parser, .. } = &mut *inner;
-        let current = parser.screen().scrollback() as i64;
-        let next = (current + delta as i64).clamp(0, i64::MAX) as usize;
-        // set_scrollback clamps the upper bound to the actual history length,
-        // so we never need to know the max ourselves.
-        parser.screen_mut().set_scrollback(next);
-        parser.screen().scrollback()
+        let screen = inner.parser.screen_mut();
+
+        let current = screen.scrollback();
+        let next = current.saturating_add_signed(delta);
+
+        screen.set_scrollback(next);
+        screen.scrollback()
     }
 
     pub fn get_initial_screen_state(&self) -> Bytes {
@@ -676,7 +674,7 @@ impl LocalConsole {
     }
 
     /// Returns the maximum available PTY size for the current OS terminal window (rows - 1 for statusbar)
-    pub fn get_pty_size(&self) -> PtySize {
+    pub fn get_pty_size() -> PtySize {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         PtySize {
             cols,
@@ -702,7 +700,7 @@ impl LocalConsole {
 
 /// Secondary Device Attributes reply. DCS/DA responses like this one have no
 /// typed variant in termwiz (which models only the *request*), so the shell
-/// wire format is a named constant. WezTerm answers identically: Pp=1 (VT220),
+/// wire format is a named constant. `WezTerm` answers identically: Pp=1 (VT220),
 /// Pv=277 (xterm patch level -> fish enables ttymouse=sgr / 24-bit color).
 #[cfg(unix)]
 const DA2_RESP: &[u8] = b"\x1b[>1;277;0c";
@@ -833,13 +831,14 @@ impl Perform for Osc52Handler<'_> {
             self.buffer.extend_from_slice(target);
 
             // Re-attach payload (params[2] and beyond)
-            if params.len() > 2 {
-                for p in &params[2..] {
+            let payload = params.get(2..).unwrap_or_default();
+            if payload.is_empty() {
+                self.buffer.extend_from_slice(b";");
+            } else {
+                for p in payload {
                     self.buffer.extend_from_slice(b";");
                     self.buffer.extend_from_slice(p);
                 }
-            } else {
-                self.buffer.extend_from_slice(b";");
             }
 
             // Re-attach original terminator
@@ -917,7 +916,7 @@ pub fn window_change_signal() -> mpsc::Receiver<()> {
 
         while sig.recv().await.is_some() {
             // Drop duplicate signals if receiver hasn't processed the previous one
-            if matches!(tx.try_send(()), Err(mpsc::error::TrySendError::Closed(_))) {
+            if matches!(tx.try_send(()), Err(mpsc::error::TrySendError::Closed(()))) {
                 break;
             }
         }
@@ -1067,6 +1066,7 @@ impl Perform for StdinPerformer {
         // FILTER 1: Drop unsolicited terminal auto-responses from stdin
         // (CPR: \x1b[..R, DSR: \x1b[0n, DA1: \x1b[?...c)
         // -------------------------------------------------------------
+        #[allow(clippy::match_same_arms)]
         match (action, intermediates) {
             // CPR Cursor Position Report response (e.g. \x1b[24;80R)
             ('R', []) => return,
@@ -1162,7 +1162,7 @@ impl Perform for StdinPerformer {
         // Only serialize parameters if they were explicitly present
         if !p_list.is_empty() && p_list.as_slice() != [[0]] {
             let mut first = true;
-            for subparam in params.iter() {
+            for subparam in params {
                 if !first {
                     self.pty_output.extend_from_slice(b";");
                 }
@@ -1242,6 +1242,6 @@ impl TerminalSizeNegotiator {
         self.helpers
             .values()
             .map(|h| h.size)
-            .fold(self.local_size, |acc, s| acc.min_dimensions(s))
+            .fold(self.local_size, super::protocol::PtySize::min_dimensions)
     }
 }

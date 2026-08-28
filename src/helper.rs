@@ -1,6 +1,6 @@
 use crate::{
     ConnectArgs, app_config,
-    common::{ALPN, ConnectionStateWatcher},
+    common::{ALPN, CODEC_BUFFER_SIZE, ConnectionStateWatcher, QUEUE_SIZE},
     console::{
         LocalConsole, LocalEvent, Osc52Extractor, Role, StatusBarHandle, StdinProcessor,
         window_change_signal,
@@ -28,8 +28,8 @@ impl VictimHub {
         args: ConnectArgs,
         statusbar_handle: StatusBarHandle,
     ) -> color_eyre::Result<Self> {
-        let (to_victim_tx, to_victim_rx) = mpsc::channel::<ToVictim>(1024);
-        let (from_victim_tx, from_victim_rx) = mpsc::channel::<ToHelper>(1024);
+        let (to_victim_tx, to_victim_rx) = mpsc::channel::<ToVictim>(QUEUE_SIZE);
+        let (from_victim_tx, from_victim_rx) = mpsc::channel::<ToHelper>(QUEUE_SIZE);
 
         let link = timeout(
             Duration::from_secs(10),
@@ -76,7 +76,7 @@ impl Helper {
         // Send initial terminal dimensions to victim shell
         hub.send(ToVictim::SizeHint {
             id,
-            size: console.get_pty_size(),
+            size: LocalConsole::get_pty_size(),
         })
         .await?;
 
@@ -84,14 +84,14 @@ impl Helper {
         let mut screen_size_resend =
             tokio::time::interval(Duration::from_secs((TIMEOUT / 2).as_secs()));
 
-        let pty_size: PtySize = console.get_pty_size();
-        let mut stdin_processor = StdinProcessor::new(pty_size.rows as i32);
+        let pty_size: PtySize = LocalConsole::get_pty_size();
+        let mut stdin_processor = StdinProcessor::new(pty_size.rows.into());
 
         let res: color_eyre::Result<()> = 'main_loop: loop {
             tokio::select! {
                 // Peroidically resend term size to keep TermSizeNegotiator alive
                 _ = screen_size_resend.tick() => {
-                    hub.send(ToVictim::SizeHint { id, size: console.get_pty_size() }).await?;
+                    hub.send(ToVictim::SizeHint { id, size: LocalConsole::get_pty_size() }).await?;
                 }
 
                 // Status bar update -> render frame locally
@@ -109,9 +109,9 @@ impl Helper {
                             p.screen().application_cursor(),
                         ))
                     };
-                    let pty_size: PtySize = console.get_pty_size();
+                    let pty_size: PtySize = LocalConsole::get_pty_size();
 
-                    stdin_processor.set_state(alt, mouse_on, pty_size.rows as i32, app_cursor);
+                    stdin_processor.set_state(alt, mouse_on, pty_size.rows.into(), app_cursor);
 
                     // Parse bytes safely (streaming tokenizer)
                     let (events, pty_bytes) = stdin_processor.process(&bytes);
@@ -121,7 +121,7 @@ impl Helper {
                         match event {
                             LocalEvent::Detach => break 'main_loop Ok(()),
                             LocalEvent::Scroll(delta) => {
-                                let offset = console.apply_scroll(delta).await as u32;
+                                let offset = console.apply_scroll(delta.try_into()?).try_into()?;
                                 hub.send(ToVictim::RequestScrollTo { offset }).await?;
                                 console.render().await?;
                             }
@@ -140,7 +140,7 @@ impl Helper {
 
                 // Window resize signal (SIGWINCH)
                 _ = sigwinch.recv() => {
-                    hub.send(ToVictim::SizeHint { id, size: console.get_pty_size() } ).await?;
+                    hub.send(ToVictim::SizeHint { id, size: LocalConsole::get_pty_size() } ).await?;
                 }
 
                 // Victim output -> feed into local VT parser & render screen
@@ -256,7 +256,7 @@ impl Link {
         let encoder = async_compression::tokio::write::Lz4Encoder::new(tx);
         let decoder = async_compression::tokio::bufread::Lz4Decoder::new(BufReader::new(rx));
         let mut codec_builder = LengthDelimitedCodec::builder();
-        codec_builder.max_frame_length(8 * 1024 * 1024);
+        codec_builder.max_frame_length(CODEC_BUFFER_SIZE);
         let mut raw_writer =
             tokio_util::codec::FramedWrite::new(encoder, codec_builder.new_codec());
         let mut raw_reader = tokio_util::codec::FramedRead::new(decoder, codec_builder.new_codec());
@@ -280,6 +280,7 @@ impl Link {
             while let Some(msg) = to_victim_rx.recv().await {
                 if let Ok(encoded) = msg.encode()
                     && raw_writer.send(encoded).await.is_err()
+                    && raw_writer.flush().await.is_err()
                 {
                     break;
                 }
@@ -300,8 +301,8 @@ impl Link {
     pub async fn shutdown(&self) {
         let handle = self.writer_handle.lock().take();
 
-        if let Some(handle) = handle {
-            let _ = tokio::time::timeout(Duration::from_millis(500), handle).await;
+        if let Some(h) = handle {
+            let _ = tokio::time::timeout(Duration::from_millis(500), h).await;
         }
 
         self.endpoint.close().await;

@@ -125,14 +125,14 @@ async fn main() -> color_eyre::Result<()> {
                     .extend(list);
             }
 
-            Victim::run(args).await?
+            Victim::run(args).await?;
         }
         Cmd::Connect(mut args) => {
             if args.common.code.is_none() {
                 args.common.code = Some(wormhole_cli::completer::enter_code()?.parse()?);
             }
 
-            Helper::run(args).await?
+            Helper::run(args).await?;
         }
         Cmd::Copy => copy_to_osc52()?,
         Cmd::Wormhole { args } => {

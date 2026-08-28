@@ -7,6 +7,27 @@ authors = ["Elias Dalbeck <eliasdalbeck42@gmail.com>"]
 
 [lints.clippy]
 disallowed_types = "deny"
+pedantic = { level = "warn", priority = -1 }
+too_many_lines = "allow"
+
+# 1. Eliminate unhandled panics and debugging leftovers
+unwrap_used = "warn"              # Prefer ? or pattern matching over .unwrap()
+dbg_macro = "warn"                # Catch leftover dbg!() calls
+todo = "warn"                     # Catch leftover todo!()
+unimplemented = "warn"            # Catch leftover unimplemented!()
+panic = "warn"                    # Catch explicit panic!() calls
+panic_in_result_fn = "warn"       # Catches functions returning Result that still panic
+
+# 2. Performance & Memory Smells
+clone_on_ref_ptr = "warn"         # Prefer Arc::clone(&x) over x.clone() (clarifies cost)
+redundant_clone = "warn"          # Catches clones where the source is no longer used
+rc_buffer = "warn"                # Catches Arc<Vec<T>> / Rc<String> instead of Arc<[T]> / Rc<str>
+needless_pass_by_value = "warn"   # Suggests taking &T instead of T when ownership isn't needed
+
+# 3. Defensive Programming & Safety
+indexing_slicing = "warn"         # Catches arr[i] which might panic; forces .get() or slicing checks
+float_cmp = "warn"                # Catches exact float comparisons (== / !=)
+shadow_reuse = "warn"             # Catches overly confusing variable shadowing
 
 [workspace]
 members = ["wormhole-cli"]

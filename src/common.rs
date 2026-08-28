@@ -5,6 +5,9 @@ use tokio::time::sleep;
 
 use crate::console::StatusBarHandle;
 
+pub const QUEUE_SIZE: usize = 1024;
+pub const CODEC_BUFFER_SIZE: usize = 256 * 1024;
+
 pub const ALPN: &[u8] = concat!("/", env!("CARGO_PKG_NAME"), "/").as_bytes();
 
 pub struct ConnectionStateWatcher {
@@ -48,8 +51,8 @@ impl ConnectionStateWatcher {
                 });
 
             match ping {
-                Some(ping) => {
-                    self.statusbar_handle.online(ping);
+                Some(p) => {
+                    self.statusbar_handle.online(p);
                 }
                 None => {
                     self.statusbar_handle.offline();

@@ -55,7 +55,7 @@ pub enum ToVictim {
     Data(Bytes),
     SizeHint { id: HelperId, size: PtySize },
     Bye { id: HelperId },
-    RequestScrollTo { offset: u32 },
+    RequestScrollTo { offset: u16 },
 }
 
 #[derive(SchemaWrite, SchemaRead, Debug, Clone)]
@@ -64,7 +64,7 @@ pub enum ToHelper {
     SetSize(PtySize),
     Bye,
     ConnectedHelpers(u8),
-    ScrollTo { offset: u32 },
+    ScrollTo { offset: u16 },
 }
 
 #[derive(SchemaWrite, SchemaRead)]
