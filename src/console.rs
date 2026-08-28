@@ -36,10 +36,16 @@ use crate::{
 
 pub const SCROLLBACK_LINES: usize = 1000;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum InternetState {
     Online(Duration),
     Offline,
+}
+
+impl InternetState {
+    pub fn is_online(&self) -> bool {
+        matches!(self, Self::Online(..))
+    }
 }
 
 impl fmt::Display for InternetState {

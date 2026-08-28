@@ -6,7 +6,7 @@ use crate::console::{
 use crate::protocol::{Encoder, HandshakePayload, PtySize, ToHelper, ToVictim};
 use crate::{ServeArgs, app_config};
 use bytes::Bytes;
-use color_eyre::eyre::{Context, eyre};
+use color_eyre::eyre::{Context, bail, eyre};
 use futures_util::{SinkExt, StreamExt};
 use iroh::{
     Endpoint, SecretKey,
@@ -21,6 +21,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::BufReader;
+use tokio::select;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::codec::LengthDelimitedCodec;
 
@@ -596,10 +597,15 @@ impl Link {
         let connection_watcher = ConnectionStateWatcher::new(endpoint, statusbar_handle.clone());
         tokio::task::spawn(async move { connection_watcher.watch().await });
 
+        let mut statusbar_rx = statusbar_handle.subscribe();
+
         tokio::task::spawn(async move {
             loop {
                 let res: color_eyre::Result<()> = async {
+                    statusbar_handle.set_code_state(WormholeCodeState::NoCode);
+                    let _ = statusbar_rx.wait_for(|s| s.internet_state.is_online()).await;
                     statusbar_handle.set_code_state(WormholeCodeState::Generating);
+
                     let mailbox = match &args.common.code {
                         Some(code) => {
                             MailboxConnection::connect(
@@ -621,7 +627,11 @@ impl Link {
                     let code = mailbox.code();
                     statusbar_handle.set_code_state(WormholeCodeState::Code(code.clone()));
 
-                    let mut wormhole = Wormhole::connect(mailbox).await?;
+                    let mut wormhole = select! {
+                        w = Wormhole::connect(mailbox) => w,
+                        _ = statusbar_rx.wait_for(|s| !s.internet_state.is_online()) => bail!("Connection lost"),
+                    }?;
+
                     wormhole.send(encoded_handshake.clone()).await?;
 
                     let bytes = wormhole.receive().await?;
@@ -633,8 +643,7 @@ impl Link {
                         // Timeout after 60s if the helper never connects via QUIC
                         tokio::time::timeout(
                             Duration::from_secs(10),
-                            statusbar_handle
-                                .subscribe()
+                                statusbar_rx
                                 .wait_for(|s| s.connected_helpers > 0),
                         )
                         .await
@@ -644,8 +653,7 @@ impl Link {
 
                         statusbar_handle.set_code_state(WormholeCodeState::NoCode);
 
-                        let _ = statusbar_handle
-                            .subscribe()
+                        let _ = statusbar_rx
                             .wait_for(|s| s.connected_helpers == 0)
                             .await;
                         *authenticated_peer.lock() = None;
