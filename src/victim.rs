@@ -458,11 +458,7 @@ impl ProtocolHandler for Protocol {
 
         let is_authorized = match &self.allowed_peers {
             Some(whitelist) => whitelist.contains(&remote_id),
-            None => self
-                .authenticated_peer
-                .lock()
-                .map(|expected| expected == remote_id)
-                .unwrap_or(false),
+            None => *self.authenticated_peer.lock() == Some(remote_id),
         };
 
         if !is_authorized {
