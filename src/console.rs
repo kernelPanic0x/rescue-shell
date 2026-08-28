@@ -133,7 +133,7 @@ pub struct StatusBarState {
     pub internet_state: InternetState,
     pub tick: usize,
     is_utf8: bool,
-    color_mode: ColorSupport,
+    color_support: ColorSupport,
     title: &'static str,
 }
 
@@ -146,7 +146,7 @@ impl StatusBarState {
             internet_state: InternetState::Offline,
             tick: 0,
             is_utf8: supports_unicode(),
-            color_mode: detect_color_support(),
+            color_support: detect_color_support(),
             title: concat!(env!("CARGO_BIN_NAME"), " ", env!("CARGO_PKG_VERSION")),
         }
     }
@@ -155,7 +155,7 @@ impl StatusBarState {
         let width = cols as usize;
 
         // --- PALETTE FALLBACKS ---
-        let (bar_bg, default_fg, separator_fg, code_fg, connection_fg) = match self.color_mode {
+        let (bar_bg, default_fg, separator_fg, code_fg, connection_fg) = match self.color_support {
             ColorSupport::TrueColor | ColorSupport::Ansi256 => (
                 Color::AnsiValue(17), // Deep Navy Blue
                 Color::White,
@@ -395,6 +395,7 @@ pub struct LocalConsole {
     stdout_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     statusbar_rx: watch::Receiver<StatusBarState>,
     is_utf8: bool,
+    color_support: ColorSupport,
 }
 
 impl LocalConsole {
@@ -457,6 +458,7 @@ impl LocalConsole {
             stdout_handle: Arc::new(Mutex::new(Some(stdout_handle))),
             statusbar_rx: statusbar_handle.subscribe(),
             is_utf8: supports_unicode(),
+            color_support: detect_color_support(),
             inner,
         })
     }
@@ -494,7 +496,11 @@ impl LocalConsole {
             let v_border = if self.is_utf8 { "│" } else { "|" };
             let h_border = if self.is_utf8 { '─' } else { '-' };
             let corner_border = if self.is_utf8 { "┘" } else { "+" };
-            let border_fg = Color::DarkGrey;
+            let border_fg = if self.color_support == ColorSupport::Basic {
+                Color::Grey
+            } else {
+                Color::DarkGrey
+            };
 
             let has_right_border = phys_cols > screen_cols;
             let has_bottom_border = phys_rows > screen_rows + 1;
