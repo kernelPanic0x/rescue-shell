@@ -104,7 +104,7 @@ Use `SHELL` environment variable to set a shell manually. It also sets `RESCUE_S
 | Raspberry Pi 2B+ | ✅ |
 | Google Pixel 7a (Termux) | ✅ |
 | Arch Linux | ✅ |
-| macOS | ⏳ not yet |
+| macOS 26 Tahoe | ✅ |
 | Windows 11 | ✅ |
 | FreeBSD 14+ | ⏳ not yet |
 
