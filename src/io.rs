@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: EUPL-1.2
+// Copyright (c) 2026–present rescue-shell contributors
+
 use base64::prelude::*;
 use color_eyre::eyre::{Context, eyre};
 use iroh::{PublicKey, SecretKey};

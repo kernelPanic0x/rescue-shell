@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: EUPL-1.2
+// Copyright (c) 2026–present rescue-shell contributors
+
 use crate::common::{ALPN, CODEC_BUFFER_SIZE, ConnectionStateWatcher, QUEUE_SIZE};
 use crate::console::{
     LocalConsole, LocalEvent, Osc52Extractor, PtyResponder, Role, StatusBarHandle, StdinProcessor,

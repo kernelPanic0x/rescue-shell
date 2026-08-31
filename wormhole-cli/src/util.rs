@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: EUPL-1.2
+// Portions Copyright (c) magic-wormhole authors (https://github.com/magic-wormhole/magic-wormhole.rs)
+// Portions Copyright (c) rescue-shell contributors
+// Modified for rescue-shell
+
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub async fn ask_user(message: impl std::fmt::Display, default_answer: bool) -> bool {

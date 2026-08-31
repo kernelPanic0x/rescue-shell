@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: EUPL-1.2
+// Copyright (c) 2026–present rescue-shell contributors
+
 use std::time::Duration;
 
 use iroh::{Endpoint, Watcher};

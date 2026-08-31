@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: EUPL-1.2
+// Portions Copyright (c) magic-wormhole authors (https://github.com/magic-wormhole/magic-wormhole.rs)
+// Portions Copyright (c) rescue-shell contributors
+// Modified for rescue-shell
+
 use std::sync::LazyLock;
 
 use color_eyre::eyre;
