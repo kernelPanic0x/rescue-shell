@@ -11,36 +11,32 @@ pedantic = { level = "warn", priority = -1 }
 too_many_lines = "allow"
 
 # 1. Eliminate unhandled panics and debugging leftovers
-unwrap_used = "warn"              # Prefer ? or pattern matching over .unwrap()
-dbg_macro = "warn"                # Catch leftover dbg!() calls
-todo = "warn"                     # Catch leftover todo!()
-unimplemented = "warn"            # Catch leftover unimplemented!()
-panic = "warn"                    # Catch explicit panic!() calls
-panic_in_result_fn = "warn"       # Catches functions returning Result that still panic
+unwrap_used = "warn"        # Prefer ? or pattern matching over .unwrap()
+dbg_macro = "warn"          # Catch leftover dbg!() calls
+todo = "warn"               # Catch leftover todo!()
+unimplemented = "warn"      # Catch leftover unimplemented!()
+panic = "warn"              # Catch explicit panic!() calls
+panic_in_result_fn = "warn" # Catches functions returning Result that still panic
 
 # 2. Performance & Memory Smells
-clone_on_ref_ptr = "warn"         # Prefer Arc::clone(&x) over x.clone() (clarifies cost)
-redundant_clone = "warn"          # Catches clones where the source is no longer used
-rc_buffer = "warn"                # Catches Arc<Vec<T>> / Rc<String> instead of Arc<[T]> / Rc<str>
-needless_pass_by_value = "warn"   # Suggests taking &T instead of T when ownership isn't needed
+clone_on_ref_ptr = "warn"       # Prefer Arc::clone(&x) over x.clone() (clarifies cost)
+redundant_clone = "warn"        # Catches clones where the source is no longer used
+rc_buffer = "warn"              # Catches Arc<Vec<T>> / Rc<String> instead of Arc<[T]> / Rc<str>
+needless_pass_by_value = "warn" # Suggests taking &T instead of T when ownership isn't needed
 
 # 3. Defensive Programming & Safety
-indexing_slicing = "warn"         # Catches arr[i] which might panic; forces .get() or slicing checks
-float_cmp = "warn"                # Catches exact float comparisons (== / !=)
-shadow_reuse = "warn"             # Catches overly confusing variable shadowing
+indexing_slicing = "warn" # Catches arr[i] which might panic; forces .get() or slicing checks
+float_cmp = "warn"        # Catches exact float comparisons (== / !=)
+shadow_reuse = "warn"     # Catches overly confusing variable shadowing
 
 [workspace]
 members = ["wormhole-cli"]
 
 [workspace.dependencies]
 magic-wormhole = { version = "0.8.1", features = ["fuzzy-complete"] }
-clap = { version = "4", default-features = false, features = [
-  "std",
-  "derive",
-  "env",
-] }
-serde = { version = "1", features = ["derive"] }
-url = { version = "2.5", default-features = false }
+clap = { version = "4.6.6", features = ["std", "derive", "env"] }
+serde = { version = "1.0.229", features = ["derive"] }
+url = { version = "2.5.8", default-features = false }
 serde_json = "1.0.151"
 dialoguer = { version = "0.12.0", features = ["completion"] }
 tokio = { version = "1.53.1", features = [
