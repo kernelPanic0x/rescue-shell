@@ -79,7 +79,9 @@ try {
         $env:WORMHOLE_RELAY_URL = 'tcp://nbg.ell.dns64.de:4001'
     }
 
-    if ($args -and $args.Count -gt 0) {
+    $hasArgs = ($args -and $args.Count -gt 0)
+
+    if ($hasArgs) {
         [string[]]$execArgs = $args
     } else {
         [string[]]$execArgs = @('serve')
@@ -88,18 +90,15 @@ try {
     # Check if already running in an elevated session
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-    if ($isAdmin) {
-        Write-Log "already running with administrator privileges."
-        & $BIN @execArgs
-    } else {
+    # Trigger UAC ONLY if NO arguments were provided AND the shell is not yet admin
+    if (-not $hasArgs -and -not $isAdmin) {
         try {
-            Write-Log "requesting administrator privileges..."
+            Write-Log "default mode: requesting administrator privileges..."
 
             $escapedBin = $BIN.Replace("'", "''")
             $escapedRelay = $env:WORMHOLE_RELAY_URL.Replace("'", "''")
             $argString = ($execArgs | ForEach-Object { "`"$_`"" }) -join ' '
 
-            # Runs binary, and if it fails/panics, prevents the window from vanishing before you can read the error
             $elevatedCmd = "`$env:WORMHOLE_RELAY_URL = '$escapedRelay'; & '$escapedBin' $argString; if (`$LASTEXITCODE -ne 0) { Write-Host '`nProcess exited with code ' `$LASTEXITCODE -ForegroundColor Red; Read-Host 'Press Enter to exit...' }"
 
             $bytes = [System.Text.Encoding]::Unicode.GetBytes($elevatedCmd)
@@ -108,10 +107,16 @@ try {
             Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCmd" -Wait -ErrorAction Stop
         }
         catch {
-            # User clicked "No" on UAC prompt
+            # User clicked "No" on UAC prompt -> continue normally
             Write-Log "elevation declined. falling back to normal user privileges..."
             & $BIN @execArgs
         }
+    } else {
+        # Custom sub-commands OR already running as Admin: run directly without UAC
+        if ($isAdmin) {
+            Write-Log "running with existing administrator privileges."
+        }
+        & $BIN @execArgs
     }
 }
 finally {
