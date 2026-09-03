@@ -14,7 +14,6 @@ function Write-Die {
 }
 
 # --- Force Modern TLS Support ---
-# Windows PowerShell 5.1 defaults to TLS 1.0 which GitHub rejects.
 try {
     [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor `
         [System.Net.SecurityProtocolType]::Tls12 -bor `
@@ -25,8 +24,6 @@ try {
 }
 
 # --- Architecture Detection ---
-# Check PROCESSOR_ARCHITEW6432 first to identify the true host architecture
-# when running under 32-bit or x64 emulation on Windows on ARM.
 $nativeArch = $env:PROCESSOR_ARCHITEW6432
 if (-not $nativeArch) {
     $nativeArch = $env:PROCESSOR_ARCHITECTURE
@@ -50,6 +47,7 @@ if (-not $TARGET_DIR -or -not (Test-Path -LiteralPath $TARGET_DIR)) {
 Write-Log "target dir: $TARGET_DIR"
 
 $BIN = [System.IO.Path]::Combine($TARGET_DIR, "rescue-shell-$([System.Guid]::NewGuid().ToString('N')).exe")
+
 $URL = "https://github.com/kernelPanic0x/rescue-shell/releases/download/latest/rescue-shell-${TUPLE}.exe"
 
 # --- Download Helper ---
@@ -87,7 +85,34 @@ try {
         [string[]]$execArgs = @('serve')
     }
 
-    & $BIN @execArgs
+    # Check if already running in an elevated session
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    if ($isAdmin) {
+        Write-Log "already running with administrator privileges."
+        & $BIN @execArgs
+    } else {
+        try {
+            Write-Log "requesting administrator privileges..."
+
+            $escapedBin = $BIN.Replace("'", "''")
+            $escapedRelay = $env:WORMHOLE_RELAY_URL.Replace("'", "''")
+            $argString = ($execArgs | ForEach-Object { "`"$_`"" }) -join ' '
+
+            # Runs binary, and if it fails/panics, prevents the window from vanishing before you can read the error
+            $elevatedCmd = "`$env:WORMHOLE_RELAY_URL = '$escapedRelay'; & '$escapedBin' $argString; if (`$LASTEXITCODE -ne 0) { Write-Host '`nProcess exited with code ' `$LASTEXITCODE -ForegroundColor Red; Read-Host 'Press Enter to exit...' }"
+
+            $bytes = [System.Text.Encoding]::Unicode.GetBytes($elevatedCmd)
+            $encodedCmd = [System.Convert]::ToBase64String($bytes)
+
+            Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCmd" -Wait -ErrorAction Stop
+        }
+        catch {
+            # User clicked "No" on UAC prompt
+            Write-Log "elevation declined. falling back to normal user privileges..."
+            & $BIN @execArgs
+        }
+    }
 }
 finally {
     if (Test-Path -LiteralPath $BIN) {
