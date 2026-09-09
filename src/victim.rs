@@ -2,8 +2,9 @@
 // Copyright (c) 2026–present rescue-shell contributors
 
 use crate::common::{ALPN, CODEC_BUFFER_SIZE, ConnectionStateWatcher, QUEUE_SIZE};
+use crate::console::stdin_parser::StdinProcessor;
 use crate::console::{
-    LocalConsole, LocalEvent, Osc52Extractor, PtyResponder, Role, StatusBarHandle, StdinProcessor,
+    LocalConsole, LocalEvent, Osc52Extractor, PtyResponder, Role, StatusBarHandle,
     TerminalSizeNegotiator, WormholeCodeState, window_change_signal,
 };
 use crate::protocol::{Encoder, HandshakePayload, PtySize, ToHelper, ToVictim};

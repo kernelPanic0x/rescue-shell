@@ -34,8 +34,11 @@ use vte::{Params, Perform};
 
 use crate::{
     common::QUEUE_SIZE,
+    console::stdin_parser::{ESC_QUIET_PERIOD, maybe_partial, stdin_readable},
     protocol::{HelperId, PtySize, TIMEOUT},
 };
+
+pub mod stdin_parser;
 
 pub const SCROLLBACK_LINES: usize = 1000;
 
@@ -435,19 +438,33 @@ impl LocalConsole {
 
         std::thread::spawn(move || {
             let mut buf = [0u8; 1024];
+            let mut burst: Vec<u8> = Vec::with_capacity(2048);
+
             loop {
-                match std::io::stdin().read(&mut buf) {
+                burst.clear();
+                let n = match std::io::stdin().read(&mut buf) {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
+                    Ok(n) => n,
+                };
+                #[expect(clippy::indexing_slicing)]
+                burst.extend_from_slice(&buf[..n]);
+
+                // Keep reading while the tail could still grow into an escape sequence
+                // AND bytes keep arriving. Once the fd is silent for ESC_QUIET_PERIOD,
+                // the burst is complete — a trailing ESC is a lone key press.
+                while maybe_partial(&burst) && stdin_readable(ESC_QUIET_PERIOD) {
+                    match std::io::stdin().read(&mut buf) {
+                        Ok(0) | Err(_) => break,
                         #[expect(clippy::indexing_slicing)]
-                        let slice = &buf[..n];
-                        if stdin_tx
-                            .blocking_send(Bytes::copy_from_slice(slice))
-                            .is_err()
-                        {
-                            break;
-                        }
+                        Ok(m) => burst.extend_from_slice(&buf[..m]),
                     }
+                }
+
+                if stdin_tx
+                    .blocking_send(Bytes::copy_from_slice(&burst))
+                    .is_err()
+                {
+                    break;
                 }
             }
         });
@@ -992,245 +1009,6 @@ pub fn window_change_signal() -> mpsc::Receiver<()> {
 pub enum LocalEvent {
     Detach,
     Scroll(i32),
-}
-
-pub struct StdinProcessor {
-    parser: vte::Parser,
-    performer: StdinPerformer,
-    saw_escape: bool,
-}
-
-impl StdinProcessor {
-    pub fn new(page_size: i32) -> Self {
-        Self {
-            parser: vte::Parser::new(),
-            performer: StdinPerformer {
-                row_offset: 1,
-                alt_screen: false,
-                mouse_on: false,
-                app_cursor: false,
-                page_size,
-                events: Vec::new(),
-                pty_output: BytesMut::new(),
-            },
-            saw_escape: false,
-        }
-    }
-
-    pub fn set_state(
-        &mut self,
-        alt_screen: bool,
-        mouse_on: bool,
-        page_size: i32,
-        app_cursor: bool,
-    ) {
-        self.performer.alt_screen = alt_screen;
-        self.performer.mouse_on = mouse_on;
-        self.performer.page_size = page_size;
-        self.performer.app_cursor = app_cursor;
-    }
-
-    pub fn process(&mut self, incoming: &[u8]) -> (Vec<LocalEvent>, Bytes) {
-        self.performer.events.clear();
-
-        for &byte in incoming {
-            // Fix for 0x7F (DEL) which VT500 standard ignores silently:
-            if byte == 0x7f {
-                if self.saw_escape {
-                    // terminal sent \x1b\x7f (e.g. Alt+Backspace / Ctrl+Backspace)
-                    // Reset parser back to Ground state and forward \x1b\x7f
-                    self.parser = vte::Parser::new();
-                    self.performer.pty_output.extend_from_slice(b"\x1b\x7f");
-                    self.saw_escape = false;
-                } else {
-                    // Regular Backspace (DEL / 0x7F)
-                    self.performer.pty_output.extend_from_slice(&[0x7f]);
-                }
-                continue;
-            }
-
-            // Track if single \x1b was seen to handle \x1b\x7f streaming across chunks
-            if byte == 0x1b {
-                if self.saw_escape {
-                    // Double escape: flush first escape to PTY
-                    self.performer.pty_output.extend_from_slice(&[0x1b]);
-                }
-                self.saw_escape = true;
-                self.parser.advance(&mut self.performer, &[byte]);
-                continue;
-            }
-
-            self.saw_escape = false;
-            // Let vte stream-tokenize everything else safely
-            self.parser.advance(&mut self.performer, &[byte]);
-        }
-
-        let events = self.performer.events.clone();
-        let pty_bytes = self.performer.pty_output.split().freeze();
-
-        (events, pty_bytes)
-    }
-}
-
-pub struct StdinPerformer {
-    pub row_offset: u16,
-    pub alt_screen: bool,
-    pub mouse_on: bool,
-    pub app_cursor: bool,
-    pub page_size: i32,
-    pub events: Vec<LocalEvent>,
-    pub pty_output: BytesMut,
-}
-
-impl Perform for StdinPerformer {
-    // 1. Regular character typing
-    fn print(&mut self, c: char) {
-        let mut buf = [0u8; 4];
-        self.pty_output
-            .extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-    }
-
-    // 2. Control characters (Ctrl+C, \r, \n, \t, Ctrl+H, etc.)
-    fn execute(&mut self, byte: u8) {
-        if byte == 0x1d {
-            self.events.push(LocalEvent::Detach);
-            return;
-        }
-        self.pty_output.extend_from_slice(&[byte]);
-    }
-
-    // 3. CSI Sequences (Mouse, Arrow keys, PageUp/Down, etc.)
-    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
-        let p_list: Vec<&[u16]> = params.iter().collect();
-
-        // -------------------------------------------------------------
-        // FILTER 1: Drop unsolicited terminal auto-responses from stdin
-        // (CPR: \x1b[..R, DSR: \x1b[0n, DA1: \x1b[?...c)
-        // -------------------------------------------------------------
-        #[allow(clippy::match_same_arms)]
-        match (action, intermediates) {
-            // CPR Cursor Position Report response (e.g. \x1b[24;80R)
-            ('R', []) => return,
-            // DSR Device Status Report response (\x1b[0n)
-            ('n', []) if p_list.as_slice() == [[0]] => return,
-            // Primary Device Attributes response (\x1b[?62;...c)
-            ('c', b"?") => return,
-            _ => {}
-        }
-
-        // --- LOCAL SCROLL CHECK (when NOT in alternate screen) ---
-        if !self.alt_screen {
-            // PageUp: CSI 5 ~  |  Shift+PageUp: CSI 5 ; 2 ~
-            if intermediates.is_empty() && action == '~' {
-                match p_list.as_slice() {
-                    [[5]] | [[5], [2]] => {
-                        self.events.push(LocalEvent::Scroll(self.page_size));
-                        return;
-                    }
-                    [[6]] | [[6], [2]] => {
-                        self.events.push(LocalEvent::Scroll(-self.page_size));
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-
-            // Ctrl+Up: CSI 1 ; 5 A  |  Ctrl+Down: CSI 1 ; 5 B
-            if intermediates.is_empty()
-                && let [[1], [5]] = p_list.as_slice()
-            {
-                if action == 'A' {
-                    self.events.push(LocalEvent::Scroll(1));
-                    return;
-                } else if action == 'B' {
-                    self.events.push(LocalEvent::Scroll(-1));
-                    return;
-                }
-            }
-        }
-
-        // --- SGR MOUSE EVENTS: CSI < btn ; col ; row (M|m) ---
-        if intermediates == b"<" && (action == 'M' || action == 'm') {
-            let mut it = params.iter();
-            if let (Some(&[btn]), Some(&[col]), Some(&[row])) = (it.next(), it.next(), it.next()) {
-                // SGR Wheel Scroll (64: wheel up, 65: wheel down) on press ('M')
-                if !self.alt_screen && action == 'M' && (btn == 64 || btn == 65) {
-                    let delta = if btn == 64 { 3 } else { -3 };
-                    self.events.push(LocalEvent::Scroll(delta));
-                    return;
-                }
-
-                // If remote application didn't enable mouse, discard mouse sequences in main screen
-                if !self.alt_screen && !self.mouse_on {
-                    return;
-                }
-
-                // Discard click if it hits the status bar
-                if row <= self.row_offset {
-                    return;
-                }
-
-                // Adjust row offset and forward to PTY
-                let adjusted_row = row - self.row_offset;
-                let seq = format!("\x1b[<{btn};{col};{adjusted_row}{action}");
-                self.pty_output.extend_from_slice(seq.as_bytes());
-                return;
-            }
-        }
-
-        // --- ARROW KEYS & CURSOR NAVIGATION (Up, Down, Right, Left, Home, End) ---
-        // Handle plain arrows with no explicit parameter or default 0/1 param
-        let is_plain_cursor = intermediates.is_empty()
-            && (p_list.is_empty() || p_list.as_slice() == [[0]] || p_list.as_slice() == [[1]]);
-
-        if is_plain_cursor && matches!(action, 'A' | 'B' | 'C' | 'D' | 'H' | 'F') {
-            if self.app_cursor {
-                // Application Cursor Mode -> \x1bOA .. \x1bOD
-                self.pty_output.extend_from_slice(b"\x1bO");
-                self.pty_output.extend_from_slice(&[action as u8]);
-            } else {
-                // Normal Cursor Mode -> \x1b[A .. \x1b[D (NEVER \x1b[0A!)
-                self.pty_output.extend_from_slice(b"\x1b[");
-                self.pty_output.extend_from_slice(&[action as u8]);
-            }
-            return;
-        }
-
-        // --- FALLBACK: Forward any other CSI sequence to PTY ---
-        self.pty_output.extend_from_slice(b"\x1b[");
-        self.pty_output.extend_from_slice(intermediates);
-
-        // Only serialize parameters if they were explicitly present
-        if !p_list.is_empty() && p_list.as_slice() != [[0]] {
-            let mut first = true;
-            for subparam in params {
-                if !first {
-                    self.pty_output.extend_from_slice(b";");
-                }
-                first = false;
-                let mut sub_first = true;
-                for &val in subparam {
-                    if !sub_first {
-                        self.pty_output.extend_from_slice(b":");
-                    }
-                    sub_first = false;
-                    self.pty_output
-                        .extend_from_slice(val.to_string().as_bytes());
-                }
-            }
-        }
-
-        let mut action_buf = [0u8; 4];
-        self.pty_output
-            .extend_from_slice(action.encode_utf8(&mut action_buf).as_bytes());
-    }
-
-    // 4. Escape sequences (e.g. Alt+keys)
-    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
-        self.pty_output.extend_from_slice(&[0x1b]);
-        self.pty_output.extend_from_slice(intermediates);
-        self.pty_output.extend_from_slice(&[byte]);
-    }
 }
 
 struct HelperLifetime {

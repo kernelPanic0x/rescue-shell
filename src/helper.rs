@@ -5,8 +5,8 @@ use crate::{
     ConnectArgs, app_config,
     common::{ALPN, CODEC_BUFFER_SIZE, ConnectionStateWatcher, QUEUE_SIZE},
     console::{
-        LocalConsole, LocalEvent, Osc52Extractor, Role, StatusBarHandle, StdinProcessor,
-        window_change_signal,
+        LocalConsole, LocalEvent, Osc52Extractor, Role, StatusBarHandle,
+        stdin_parser::StdinProcessor, window_change_signal,
     },
     protocol::{Encoder, HandshakePayload, HelperId, PtySize, TIMEOUT, ToHelper, ToVictim},
 };
