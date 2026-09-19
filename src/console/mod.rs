@@ -148,6 +148,7 @@ pub struct StatusBarState {
     pub connected_helpers: u8,
     pub internet_state: InternetState,
     pub tick: usize,
+    pub pause_until: Instant,
     is_utf8: bool,
     color_support: ColorSupport,
     title: &'static str,
@@ -161,6 +162,7 @@ impl StatusBarState {
             connected_helpers: 0,
             internet_state: InternetState::Offline,
             tick: 0,
+            pause_until: Instant::now(),
             is_utf8: supports_unicode(),
             color_support: detect_color_support(),
             title: concat!(env!("CARGO_BIN_NAME"), " ", env!("CARGO_PKG_VERSION")),
@@ -317,10 +319,9 @@ impl StatusBarHandle {
 
         let tx_clone = tx.clone();
         tokio::spawn(async move {
-            sleep(Duration::from_secs(3)).await;
-
-            // Adjust scroll speed here (e.g. 300ms per character step)
+            sleep(Duration::from_secs(5)).await;
             let mut interval = tokio::time::interval(Duration::from_millis(300));
+
             loop {
                 interval.tick().await;
 
@@ -329,7 +330,11 @@ impl StatusBarHandle {
                     break;
                 }
 
-                tx_clone.send_modify(|s| s.tick = s.tick.wrapping_add(1));
+                tx_clone.send_modify(|s| {
+                    if Instant::now() > s.pause_until {
+                        s.tick = s.tick.wrapping_add(1);
+                    }
+                });
             }
         });
 
@@ -337,6 +342,13 @@ impl StatusBarHandle {
     }
 
     pub fn set_code_state(&self, code: WormholeCodeState) {
+        if let WormholeCodeState::Code(_) = code {
+            // Pause statusbar scroll on new wormhole code
+            self.tx.send_modify(|s| {
+                s.pause_until = Instant::now() + Duration::from_secs(12);
+                s.tick = 0;
+            });
+        }
         self.tx.send_modify(|s| s.code = code);
     }
 
