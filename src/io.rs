@@ -10,20 +10,28 @@ use std::{
     str::FromStr,
 };
 
+use crate::console::{OSC_RESCUE_SHELL_CMD, OSC_RESCUE_SHELL_NAME};
+
 pub fn copy_to_osc52() -> color_eyre::Result<()> {
     let mut buffer = Vec::new();
     stdin().read_to_end(&mut buffer)?;
 
     let encoded = BASE64_STANDARD.encode(&buffer);
 
-    // \x1b]52;c; -> Start OSC 52 sequence ('c' specifies system clipboard)
-    // \x07       -> BEL character to terminate sequence (or \x1b\ for ST)
-    let osc52 = format!("\x1b]52;c;{encoded}\x07");
-
     let mut stdout = stdout().lock();
-    stdout.write_all(osc52.as_bytes())?;
+    write!(stdout, "\x1b]52;c;{encoded}\x07")?;
     stdout.flush()?;
 
+    Ok(())
+}
+
+pub fn print_new_name(name: &str) -> color_eyre::Result<()> {
+    let mut stdout = stdout().lock();
+    write!(
+        stdout,
+        "\x1b]{OSC_RESCUE_SHELL_CMD};{OSC_RESCUE_SHELL_NAME};{name}\x07"
+    )?;
+    stdout.flush()?;
     Ok(())
 }
 

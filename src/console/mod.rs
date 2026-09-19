@@ -39,8 +39,12 @@ use crate::{
 };
 
 pub mod stdin_parser;
+pub mod title;
 
 pub const SCROLLBACK_LINES: usize = 1000;
+
+pub const OSC_RESCUE_SHELL_CMD: &str = "1337";
+pub const OSC_RESCUE_SHELL_NAME: &str = "RescueShellName";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum InternetState {
@@ -845,6 +849,69 @@ impl Perform for PtyResponderHandler<'_> {
             }
 
             _ => {}
+        }
+    }
+}
+
+pub struct OscTitleExtractorReturn {
+    pub title: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Default)]
+pub struct OscTitleExtractor {
+    parser: vte::Parser,
+    title: Option<String>,
+    name: Option<String>,
+}
+
+impl OscTitleExtractor {
+    pub fn extract(&mut self, chunk: &[u8]) -> OscTitleExtractorReturn {
+        let mut handler = OscTitleHandler {
+            title: &mut self.title,
+            name: &mut self.name,
+        };
+        self.parser.advance(&mut handler, chunk);
+
+        OscTitleExtractorReturn {
+            title: self.title.take(),
+            name: self.name.take(),
+        }
+    }
+}
+
+struct OscTitleHandler<'a> {
+    title: &'a mut Option<String>,
+    name: &'a mut Option<String>,
+}
+
+impl Perform for OscTitleHandler<'_> {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if let Some(&cmd) = params.first() {
+            // OSC 0 or 2: Window title
+            if cmd == b"0" || cmd == b"2" {
+                let title_bytes = if let Some(p) = params.get(1..) {
+                    p.join(&b';')
+                } else {
+                    Vec::new()
+                };
+
+                *self.title = Some(String::from_utf8_lossy(&title_bytes).into_owned());
+            }
+            // Custom OSC: Rename current session
+            else if cmd == OSC_RESCUE_SHELL_CMD.as_bytes()
+                && let Some(id) = params.get(1)
+                && *id == OSC_RESCUE_SHELL_NAME.as_bytes()
+            {
+                // Rejoin params[2..] in case name contains semicolons
+                let name_bytes = if let Some(p) = params.get(2..) {
+                    p.join(&b';')
+                } else {
+                    Vec::new()
+                };
+
+                *self.name = Some(String::from_utf8_lossy(&name_bytes).into_owned());
+            }
         }
     }
 }

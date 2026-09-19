@@ -3,9 +3,10 @@
 
 use crate::common::{ALPN, CODEC_BUFFER_SIZE, ConnectionStateWatcher, QUEUE_SIZE};
 use crate::console::stdin_parser::StdinProcessor;
+use crate::console::title::TitleSession;
 use crate::console::{
-    LocalConsole, LocalEvent, Osc52Extractor, PtyResponder, Role, StatusBarHandle,
-    TerminalSizeNegotiator, WormholeCodeState, window_change_signal,
+    LocalConsole, LocalEvent, Osc52Extractor, OscTitleExtractor, PtyResponder, Role,
+    StatusBarHandle, TerminalSizeNegotiator, WormholeCodeState, window_change_signal,
 };
 use crate::protocol::{Encoder, HandshakePayload, PtySize, ToHelper, ToVictim};
 use crate::{ServeArgs, app_config};
@@ -241,7 +242,7 @@ pub struct Victim {
 }
 
 impl Victim {
-    pub async fn run(args: ServeArgs) -> color_eyre::Result<()> {
+    pub async fn run(args: ServeArgs, mut title_session: TitleSession) -> color_eyre::Result<()> {
         let statusbar_handle = StatusBarHandle::new(Role::Victim);
         let console = LocalConsole::new(&statusbar_handle)?;
         console.render().await?;
@@ -251,6 +252,7 @@ impl Victim {
         let pty_size: PtySize = LocalConsole::get_pty_size();
         let pty = PtySession::spawn(pty_size)?;
         let mut osc52_extractor = Osc52Extractor::default();
+        let mut title_extractor = OscTitleExtractor::default();
 
         let mut sigwinch = window_change_signal();
 
@@ -291,6 +293,14 @@ impl Victim {
 
                     if let Some(output) = osc52_extractor.extract(&bytes) {
                         console.write_stdout(output).await?;
+                    }
+
+                    let title_ret = title_extractor.extract(&bytes);
+                    if let Some(command) = title_ret.title {
+                        title_session.set_command(&command);
+                    }
+                    if let Some(name) = title_ret.name {
+                        title_session = TitleSession::new(name);
                     }
 
                     hub.broadcast(ToHelper::Data(Bytes::from(bytes)));

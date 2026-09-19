@@ -16,8 +16,9 @@ use iroh::{PublicKey, SecretKey};
 use magic_wormhole::{AppID, Code, transfer::APP_CONFIG};
 
 use crate::{
+    console::title::TitleSession,
     helper::Helper,
-    io::{copy_to_osc52, gen_public_key, gen_secret_key, read_public_keys_file},
+    io::{copy_to_osc52, gen_public_key, gen_secret_key, print_new_name, read_public_keys_file},
     victim::Victim,
 };
 
@@ -46,6 +47,11 @@ enum Cmd {
     Connect(ConnectArgs),
     /// Copys stdin to OSC52 for remote clipboard
     Copy,
+    /// Rename current rescue-shell session
+    Rename {
+        /// The new name of the session
+        name: String,
+    },
     /// Send/receive files or forward ports (embedded wormhole-rs)
     Wormhole {
         /// Passed through to wormhole-rs verbatim, e.g. `rescue-shell wormhole send -c 4 file.txt`
@@ -76,6 +82,10 @@ struct CommonArgs {
     /// The wormhole code to establish a connection.
     #[arg(long, short, env = "RESCUE_SHELL_CODE")]
     code: Option<Code>,
+
+    /// Set the rescue-shell instance name
+    #[arg(long, short, env = "RESCUE_SHELL_NAME", default_value = "")]
+    name: String,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -121,6 +131,8 @@ async fn main() -> color_eyre::Result<()> {
 
     match cli.cmd {
         Cmd::Serve(mut args) => {
+            let title_session = TitleSession::new(args.common.name.clone());
+
             if let Some(path) = &args.allowed_public_keys_file {
                 let list = read_public_keys_file(path).context("Read public keys from file")?;
                 args.allowed_public_keys
@@ -128,16 +140,19 @@ async fn main() -> color_eyre::Result<()> {
                     .extend(list);
             }
 
-            Victim::run(args).await?;
+            Victim::run(args, title_session).await?;
         }
         Cmd::Connect(mut args) => {
+            let title_session = TitleSession::new(args.common.name.clone());
+
             if args.common.code.is_none() {
                 args.common.code = Some(wormhole_cli::completer::enter_code()?.parse()?);
             }
 
-            Helper::run(args).await?;
+            Helper::run(args, title_session).await?;
         }
         Cmd::Copy => copy_to_osc52()?,
+        Cmd::Rename { name } => print_new_name(&name)?,
         Cmd::Wormhole { args } => {
             let code = wormhole_cli::run_from(args).await;
             if code != 0 {

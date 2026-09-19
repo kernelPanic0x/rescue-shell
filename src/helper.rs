@@ -5,8 +5,8 @@ use crate::{
     ConnectArgs, app_config,
     common::{ALPN, CODEC_BUFFER_SIZE, ConnectionStateWatcher, QUEUE_SIZE},
     console::{
-        LocalConsole, LocalEvent, Osc52Extractor, Role, StatusBarHandle,
-        stdin_parser::StdinProcessor, window_change_signal,
+        LocalConsole, LocalEvent, Osc52Extractor, OscTitleExtractor, Role, StatusBarHandle,
+        stdin_parser::StdinProcessor, title::TitleSession, window_change_signal,
     },
     protocol::{Encoder, HandshakePayload, HelperId, PtySize, TIMEOUT, ToHelper, ToVictim},
 };
@@ -66,15 +66,16 @@ impl VictimHub {
 pub struct Helper;
 
 impl Helper {
-    pub async fn run(args: ConnectArgs) -> color_eyre::Result<()> {
+    pub async fn run(args: ConnectArgs, mut title_session: TitleSession) -> color_eyre::Result<()> {
         let id = getrandom::u64()?.into();
         let statusbar_handle = StatusBarHandle::new(Role::Helper);
-        let hub = VictimHub::connect(args, statusbar_handle.clone()).await?;
+        let hub = VictimHub::connect(args.clone(), statusbar_handle.clone()).await?;
         let console = LocalConsole::new(&statusbar_handle)?;
         console.render().await?;
         let mut statusbar_rx = statusbar_handle.subscribe();
 
         let mut osc52_extractor = Osc52Extractor::default();
+        let mut title_extractor = OscTitleExtractor::default();
 
         // Send initial terminal dimensions to victim shell
         hub.send(ToVictim::SizeHint {
@@ -152,6 +153,14 @@ impl Helper {
                         Some(ToHelper::Data(bytes)) => {
                             if let Some(output) = osc52_extractor.extract(&bytes) {
                                 console.write_stdout(output).await?;
+                            }
+
+                            let title_ret = title_extractor.extract(&bytes);
+                            if let Some(command) = title_ret.title {
+                                title_session.set_command(&command);
+                            }
+                            if let Some(name) = title_ret.name {
+                                title_session = TitleSession::new(name);
                             }
 
                             console.access_parser_mut(|p| p.process(&bytes));
