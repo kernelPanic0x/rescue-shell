@@ -96,6 +96,7 @@ Use `SHELL` environment variable to set a shell manually. It also sets `RESCUE_S
 | `$RESCUE_SHELL connect [OPTIONS]` | Connect to a session (Helper) |
 | `$RESCUE_SHELL copy` | Copy stdin to OSC52 for remote clipboard |
 | `$RESCUE_SHELL wormhole <COMMAND> [OPTIONS]` | Full wormhole-rs cli version 0.8.1 included |
+| `$RESCUE_SHELL rename <STRING>` | Rename the current session |
 
 ## 🧪 Tested platforms
 
