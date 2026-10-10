@@ -66,6 +66,7 @@ enum Cmd {
     /// Generate an iroh secret key and print it to stdout.
     GenKey,
     /// Tunnel stdin/stdout over a QUIC pipe (embedded quicpipe)
+    #[cfg(unix)]
     Quicpipe {
         /// Passed through to quicpipe verbatim, e.g. `rescue-shell quicpipe -h`
         #[arg(
@@ -170,6 +171,7 @@ async fn main() -> color_eyre::Result<()> {
                 std::process::exit(code);
             }
         }
+        #[cfg(unix)]
         Cmd::Quicpipe { args } => {
             let code = quicpipe::run_from(args).await;
             if code != 0 {

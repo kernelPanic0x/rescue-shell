@@ -80,7 +80,6 @@ iroh = { workspace = true }
 libc = { workspace = true }
 magic-wormhole = { workspace = true }
 wormhole-cli = { path = "./wormhole-cli" }
-quicpipe = { path = "./quicpipe" }
 n0-error = "1.0.0"
 portable-pty = "0.9.0"
 serde = { version = "1.0", default-features = false, features = [
@@ -104,6 +103,7 @@ parking_lot = "0.12.5"
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
 libc = { workspace = true }
+quicpipe = { path = "./quicpipe" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
