@@ -30,7 +30,7 @@ float_cmp = "warn"        # Catches exact float comparisons (== / !=)
 shadow_reuse = "warn"     # Catches overly confusing variable shadowing
 
 [workspace]
-members = ["wormhole-cli"]
+members = ["wormhole-cli", "quicpipe"]
 
 [workspace.dependencies]
 magic-wormhole = { version = "0.8.1", features = ["fuzzy-complete"] }
@@ -54,6 +54,12 @@ color-eyre = { version = "0.6", default-features = false, features = [
   "track-caller",
 ] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+bytes = "1.12.1"
+hex = "0.4.3"
+libc = "0.2.189"
+iroh = { version = "1.1.0", features = ["unstable-net-report"] }
+wincode = { version = "0.6.1", features = ["bytes", "derive"] }
+clio = { version = "0.3.5", features = ["clap-parse"] }
 
 [profile.release]
 opt-level = "z"
@@ -65,15 +71,16 @@ incremental = false
 [dependencies]
 color-eyre = { workspace = true }
 base64 = "0.23.1"
-bytes = "1.12.1"
+bytes = { workspace = true }
 clap = { workspace = true }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 dialoguer = { workspace = true }
 hex = "0.4.3"
-iroh = { version = "1.0.3", features = ["unstable-net-report"] }
-libc = "0.2.189"
+iroh = { workspace = true }
+libc = { workspace = true }
 magic-wormhole = { workspace = true }
 wormhole-cli = { path = "./wormhole-cli" }
+quicpipe = { path = "./quicpipe" }
 n0-error = "1.0.0"
 portable-pty = "0.9.0"
 serde = { version = "1.0", default-features = false, features = [
@@ -88,7 +95,7 @@ tokio-util = { workspace = true }
 futures-util = { workspace = true }
 url = { workspace = true }
 vt100 = "0.16.2"
-wincode = { version = "0.6.0", features = ["bytes", "derive"] }
+wincode = { workspace = true }
 vte = "0.15.0"
 async-compression = { version = "0.4.43", features = ["lz4", "tokio"] }
 getrandom = "0.4.3"
@@ -96,7 +103,7 @@ parking_lot = "0.12.5"
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
-libc = "0.2"
+libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

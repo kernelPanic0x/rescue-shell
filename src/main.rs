@@ -65,6 +65,17 @@ enum Cmd {
     },
     /// Generate an iroh secret key and print it to stdout.
     GenKey,
+    /// Tunnel stdin/stdout over a QUIC pipe (embedded quicpipe)
+    Quicpipe {
+        /// Passed through to quicpipe verbatim, e.g. `rescue-shell quicpipe -h`
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            hide = true,
+            value_name = "ARGS"
+        )]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Generate an iroh public key based a secret key read from stdin.
     GenPub,
 }
@@ -155,6 +166,12 @@ async fn main() -> color_eyre::Result<()> {
         Cmd::Rename { name } => print_new_name(&name)?,
         Cmd::Wormhole { args } => {
             let code = wormhole_cli::run_from(args).await;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Cmd::Quicpipe { args } => {
+            let code = quicpipe::run_from(args).await;
             if code != 0 {
                 std::process::exit(code);
             }

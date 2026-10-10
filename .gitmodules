@@ -1,0 +1,3 @@
+[submodule "quicpipe"]
+	path = quicpipe
+	url = git@github.com:kernelPanic0x/quicpipe.git
