@@ -206,11 +206,7 @@ impl Link {
         mut to_victim_rx: mpsc::Receiver<ToVictim>,
         from_victim_tx: mpsc::Sender<ToHelper>,
     ) -> color_eyre::Result<Self> {
-        let secret_key = args
-            .common
-            .private_key
-            .clone()
-            .unwrap_or_else(SecretKey::generate);
+        let secret_key = SecretKey::generate();
         let public_key = secret_key.public();
 
         let mailbox = MailboxConnection::connect(

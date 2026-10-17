@@ -561,11 +561,7 @@ impl Link {
         statusbar_handle: StatusBarHandle,
         authenticated_peer: Arc<Mutex<Option<PublicKey>>>,
     ) -> color_eyre::Result<Self> {
-        let secret_key = args
-            .common
-            .private_key
-            .clone()
-            .unwrap_or_else(SecretKey::generate);
+        let secret_key = SecretKey::generate();
 
         #[cfg(target_os = "android")]
         let endpoint = {

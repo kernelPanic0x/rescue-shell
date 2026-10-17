@@ -12,13 +12,13 @@ use std::{borrow::Cow, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use color_eyre::eyre::Context;
-use iroh::{PublicKey, SecretKey};
+use iroh::PublicKey;
 use magic_wormhole::{AppID, Code, transfer::APP_CONFIG};
 
 use crate::{
     console::title::TitleSession,
     helper::Helper,
-    io::{copy_to_osc52, gen_public_key, gen_secret_key, print_new_name, read_public_keys_file},
+    io::{copy_to_osc52, print_new_name, read_public_keys_file},
     victim::Victim,
 };
 
@@ -63,8 +63,6 @@ enum Cmd {
         )]
         args: Vec<std::ffi::OsString>,
     },
-    /// Generate an iroh secret key and print it to stdout.
-    GenKey,
     /// Tunnel stdin/stdout over a QUIC pipe (embedded quicpipe)
     #[cfg(unix)]
     Quicpipe {
@@ -77,8 +75,6 @@ enum Cmd {
         )]
         args: Vec<std::ffi::OsString>,
     },
-    /// Generate an iroh public key based a secret key read from stdin.
-    GenPub,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -86,10 +82,6 @@ struct CommonArgs {
     /// Use a custom rendezvous server. Both sides need to use the same value in order to find each other.
     #[arg(long, value_name = "ws://example.org", value_hint = clap::ValueHint::Url, env = "WORMHOLE_MAILBOX_URL")]
     rendezvous_server: Option<url::Url>,
-
-    /// Manually set a fixed private key.
-    #[arg(long, env = "RESCUE_SHELL_PRIVATE_KEY")]
-    private_key: Option<SecretKey>,
 
     /// The wormhole code to establish a connection.
     #[arg(long, short, env = "RESCUE_SHELL_CODE")]
@@ -178,8 +170,6 @@ async fn main() -> color_eyre::Result<()> {
                 std::process::exit(code);
             }
         }
-        Cmd::GenKey => gen_secret_key(),
-        Cmd::GenPub => gen_public_key()?,
     }
 
     Ok(())
