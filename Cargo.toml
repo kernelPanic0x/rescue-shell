@@ -60,6 +60,13 @@ libc = "0.2.189"
 iroh = { version = "1.1.0", features = ["unstable-net-report"] }
 wincode = { version = "0.6.1", features = ["bytes", "derive"] }
 clio = { version = "0.3.5", features = ["clap-parse"] }
+console = "0.16.4"
+indicatif = "0.18.6"
+parking_lot = "0.12.5"
+parse-size = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [profile.release]
 opt-level = "z"
@@ -75,18 +82,15 @@ bytes = { workspace = true }
 clap = { workspace = true }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 dialoguer = { workspace = true }
-hex = "0.4.3"
+hex = { workspace = true }
 iroh = { workspace = true }
 libc = { workspace = true }
 magic-wormhole = { workspace = true }
 wormhole-cli = { path = "./wormhole-cli" }
 n0-error = "1.0.0"
 portable-pty = "0.9.0"
-serde = { version = "1.0", default-features = false, features = [
-  "derive",
-  "std",
-] }
-serde_json = { version = "1.0", default-features = false, features = ["std"] }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
 strum = { version = "0.28", default-features = false, features = ["derive"] }
 strum_macros = "0.28.0"
 tokio = { workspace = true }
@@ -98,7 +102,7 @@ wincode = { workspace = true }
 vte = "0.15.0"
 async-compression = { version = "0.4.43", features = ["lz4", "tokio"] }
 getrandom = "0.4.3"
-parking_lot = "0.12.5"
+parking_lot = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"

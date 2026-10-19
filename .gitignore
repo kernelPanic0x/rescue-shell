@@ -2,3 +2,6 @@
 rust-analyzer.toml
 .helix
 allowed_keys
+.env
+.bash_history
+Dockerfile*

@@ -3271,6 +3271,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse-size"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "487f2ccd1e17ce8c1bfab3a65c89525af41cfad4c8659021a1e9a2aacd73b89b"
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3608,9 +3614,12 @@ dependencies = [
  "dialoguer",
  "futures-util",
  "hex",
+ "indicatif",
  "iroh",
  "libc",
  "magic-wormhole",
+ "parking_lot",
+ "parse-size",
  "proptest",
  "tempfile",
  "tokio",
