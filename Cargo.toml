@@ -103,11 +103,11 @@ vte = "0.15.0"
 async-compression = { version = "0.4.43", features = ["lz4", "tokio"] }
 getrandom = "0.4.3"
 parking_lot = { workspace = true }
+quicpipe = { path = "./quicpipe" }
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
 libc = { workspace = true }
-quicpipe = { path = "./quicpipe" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
