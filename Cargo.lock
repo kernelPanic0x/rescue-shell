@@ -3628,6 +3628,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wincode",
+ "windows-sys 0.61.2",
  "xxhash-rust",
 ]
 
